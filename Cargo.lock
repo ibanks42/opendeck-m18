@@ -520,7 +520,7 @@ dependencies = [
 
 [[package]]
 name = "opendeck-m18"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "data-url",
  "futures-lite",
