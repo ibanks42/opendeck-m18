@@ -115,8 +115,13 @@ pub async fn watcher_task(token: CancellationToken) -> Result<(), MirajazzError>
                     }
                 }
                 DeviceLifecycleEvent::Disconnected(info) => {
-                    let id = get_device_id(&info)
-                        .expect("Unable to get device id, check mappings in Kind::from_vid_pid");
+                    let Some(id) = get_device_id(&info) else {
+                        log::warn!(
+                            "Unable to get device id for disconnected device, skipping cleanup: {:?}",
+                            info
+                        );
+                        continue;
+                    };
 
                     if let Some(token) = TOKENS.write().await.remove(&id) {
                         log::info!("Sending cancel request for {}", id);

@@ -159,21 +159,22 @@ async fn device_events_task(candidate: &CandidateDevice) -> Result<(), MirajazzE
             let id = candidate.id.clone();
 
             if let Some(outbound) = OUTBOUND_EVENT_MANAGER.lock().await.as_mut() {
-                match update {
-                    DeviceStateUpdate::ButtonDown(key) => outbound.key_down(id, key).await.unwrap(),
-                    DeviceStateUpdate::ButtonUp(key) => outbound.key_up(id, key).await.unwrap(),
-                    DeviceStateUpdate::EncoderDown(encoder) => {
-                        outbound.encoder_down(id, encoder).await.unwrap();
-                    }
-                    DeviceStateUpdate::EncoderUp(encoder) => {
-                        outbound.encoder_up(id, encoder).await.unwrap();
-                    }
+                let result = match update {
+                    DeviceStateUpdate::ButtonDown(key) => outbound.key_down(id, key).await,
+                    DeviceStateUpdate::ButtonUp(key) => outbound.key_up(id, key).await,
+                    DeviceStateUpdate::EncoderDown(encoder) => outbound.encoder_down(id, encoder).await,
+                    DeviceStateUpdate::EncoderUp(encoder) => outbound.encoder_up(id, encoder).await,
                     DeviceStateUpdate::EncoderTwist(encoder, val) => {
-                        outbound
-                            .encoder_change(id, encoder, val as i16)
-                            .await
-                            .unwrap();
+                        outbound.encoder_change(id, encoder, val as i16).await
                     }
+                };
+
+                if let Err(e) = result {
+                    log::warn!(
+                        "Failed to send input event to OpenDeck for {}: {}",
+                        candidate.id,
+                        e
+                    );
                 }
             }
         }
