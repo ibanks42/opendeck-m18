@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.1] - 2026-08-10
+
+### 🚀 Features
+
+- *(device)* Add support for Streonor Stream Controller Standard S15 (#49)
+
+### 💼 Other
+
+- *(just)* Allow to set specific version for release command
+
+### ⚙️ Miscellaneous Tasks
+
+- Add AI_POLICY.md and AGENTS.md
+- Issues and pull request templates
+
 ## [0.11.0] - 2026-08-01
 
 ### 🚀 Features
