@@ -1,7 +1,11 @@
-use device::{handle_error, handle_set_image};
+use device::{DeviceCommand, DeviceOutput, command_for_set_image};
 use mirajazz::device::Device;
 use openaction::*;
-use std::{collections::HashMap, process::exit, sync::LazyLock};
+use std::{
+    collections::HashMap,
+    process::exit,
+    sync::{Arc, LazyLock},
+};
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use watcher::watcher_task;
@@ -14,9 +18,16 @@ mod inputs;
 mod mappings;
 mod watcher;
 
-pub static DEVICES: LazyLock<RwLock<HashMap<String, Device>>> =
+pub static DEVICES: LazyLock<RwLock<HashMap<String, Arc<Device>>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
-pub static TOKENS: LazyLock<RwLock<HashMap<String, CancellationToken>>> =
+pub struct TaskRegistration {
+    pub token: Arc<CancellationToken>,
+    pub generation: Option<u64>,
+}
+
+pub static TOKENS: LazyLock<RwLock<HashMap<String, TaskRegistration>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+pub static OUTPUTS: LazyLock<RwLock<HashMap<String, Arc<DeviceOutput>>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 pub static TRACKER: LazyLock<Mutex<TaskTracker>> = LazyLock::new(|| Mutex::new(TaskTracker::new()));
 
@@ -28,13 +39,16 @@ impl openaction::GlobalEventHandler for GlobalEventHandler {
     ) -> EventHandlerResult {
         let tracker = TRACKER.lock().await.clone();
 
-        let token = CancellationToken::new();
+        let token = Arc::new(CancellationToken::new());
         tracker.spawn(watcher_task(token.clone()));
 
-        TOKENS
-            .write()
-            .await
-            .insert("_watcher_task".to_string(), token);
+        TOKENS.write().await.insert(
+            "_watcher_task".to_string(),
+            TaskRegistration {
+                token,
+                generation: None,
+            },
+        );
 
         log::info!("Plugin initialized");
 
@@ -54,13 +68,19 @@ impl openaction::GlobalEventHandler for GlobalEventHandler {
             return Ok(());
         }
 
-        let id = event.device.clone();
+        let output = OUTPUTS.read().await.get(&event.device).cloned();
 
-        if let Some(device) = DEVICES.read().await.get(&event.device) {
-            handle_set_image(device, event)
-                .await
-                .map_err(async |err| handle_error(&id, err).await)
-                .ok();
+        if let Some(output) = output {
+            match command_for_set_image(event) {
+                Ok(Some(command)) => {
+                    if output.send(command).await.is_err() {
+                        log::error!("Output worker for device {} is unavailable", output.id);
+                        output.token.cancel();
+                    }
+                }
+                Ok(None) => {}
+                Err(err) => log::error!("Unable to prepare image: {}", err),
+            }
         } else {
             log::error!("Received event for unknown device: {}", event.device);
         }
@@ -75,14 +95,17 @@ impl openaction::GlobalEventHandler for GlobalEventHandler {
     ) -> EventHandlerResult {
         log::debug!("Asked to set brightness: {:#?}", event);
 
-        let id = event.device.clone();
+        let output = OUTPUTS.read().await.get(&event.device).cloned();
 
-        if let Some(device) = DEVICES.read().await.get(&event.device) {
-            device
-                .set_brightness(event.brightness)
+        if let Some(output) = output {
+            if output
+                .send(DeviceCommand::SetBrightness(event.brightness))
                 .await
-                .map_err(async |err| handle_error(&id, err).await)
-                .ok();
+                .is_err()
+            {
+                log::error!("Output worker for device {} is unavailable", output.id);
+                output.token.cancel();
+            }
         } else {
             log::error!("Received event for unknown device: {}", event.device);
         }
@@ -97,8 +120,8 @@ impl openaction::ActionEventHandler for ActionEventHandler {}
 async fn shutdown() {
     let tokens = TOKENS.write().await;
 
-    for (_, token) in tokens.iter() {
-        token.cancel();
+    for registration in tokens.values() {
+        registration.token.cancel();
     }
 }
 

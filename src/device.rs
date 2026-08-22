@@ -1,14 +1,17 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use data_url::DataUrl;
-use image::load_from_memory_with_format;
+use image::{DynamicImage, load_from_memory_with_format};
 use mirajazz::{device::Device, error::MirajazzError, state::DeviceStateUpdate};
 use openaction::{OUTBOUND_EVENT_MANAGER, SetImageEvent};
-use tokio::time::interval;
+use tokio::{
+    sync::mpsc,
+    time::{Instant, MissedTickBehavior, interval, sleep_until},
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    DEVICES, TOKENS,
+    DEVICES, OUTPUTS, TOKENS,
     inputs::opendeck_to_device,
     mappings::{
         COL_COUNT, CandidateDevice, ENCODER_COUNT, KEY_COUNT, Kind, ROW_COUNT,
@@ -16,35 +19,148 @@ use crate::{
     },
 };
 
+pub enum DeviceCommand {
+    SetImage { position: u8, image: DynamicImage },
+    ClearImage(u8),
+    ClearAll,
+    SetBrightness(u8),
+}
+
+pub struct DeviceOutput {
+    pub id: String,
+    pub token: Arc<CancellationToken>,
+    sender: mpsc::Sender<DeviceCommand>,
+}
+
+enum SessionMatch<'a> {
+    Token(&'a Arc<CancellationToken>),
+    Generation(u64),
+}
+
+impl DeviceOutput {
+    pub async fn send(&self, command: DeviceCommand) -> Result<(), ()> {
+        self.sender.send(command).await.map_err(|_| ())
+    }
+}
+
 /// Initializes a device and listens for events
-pub async fn device_task(candidate: CandidateDevice, token: CancellationToken) {
+pub async fn device_task(candidate: CandidateDevice, token: Arc<CancellationToken>) {
     log::info!("Running device task for {:?}", candidate);
 
-    // Wrap in a closure so we can use `?` operator
-    let device = async || -> Result<Device, MirajazzError> {
+    let device = async {
         let device = connect(&candidate).await?;
 
+        // Initialization is deliberately not cancellation-selectable. If the USB
+        // handle fails during one of these writes, the write future must resolve
+        // before the device is discarded.
         device.set_brightness(50).await?;
         device.clear_all_button_images().await?;
         device.flush().await?;
 
         Ok(device)
-    }()
+    }
     .await;
 
     let device: Device = match device {
         Ok(device) => device,
         Err(err) => {
-            handle_error(&candidate.id, err).await;
-
+            handle_error(&candidate.id, &token, err).await;
             log::error!(
                 "Had error during device init, finishing device task: {:?}",
                 candidate
             );
-
             return;
         }
     };
+
+    let device = Arc::new(device);
+    let (sender, receiver) = mpsc::channel(128);
+    let output = Arc::new(DeviceOutput {
+        id: candidate.id.clone(),
+        token: token.clone(),
+        sender,
+    });
+
+    if !publish_device_if_current(&candidate, &device, &output, &token).await {
+        log::debug!("Discarding cancelled connection for {}", candidate.id);
+        device.shutdown().await.ok();
+        return;
+    }
+
+    let mut output_task = tokio::spawn(device_output_task(
+        candidate.id.clone(),
+        candidate.kind.clone(),
+        device.clone(),
+        receiver,
+        token.clone(),
+    ));
+    let input_task = tokio::spawn(device_events_task(
+        candidate.clone(),
+        device.clone(),
+        token.clone(),
+    ));
+
+    let output_finished = tokio::select! {
+        result = &mut output_task => Some(result),
+        _ = token.cancelled() => None,
+    };
+
+    let output_result = match output_finished {
+        Some(result) => result,
+        None => output_task.await,
+    };
+
+    match output_result {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            handle_error(&candidate.id, &token, err).await;
+        }
+        Err(err) => {
+            log::error!("Output worker for {} panicked: {}", candidate.id, err);
+            disconnect_session(&candidate.id, &token).await;
+        }
+    }
+
+    disconnect_session(&candidate.id, &token).await;
+
+    log::info!("Shutting down owned device {:?}", candidate);
+    // This task always owns this exact handle. The output worker has fully
+    // stopped, so shutdown cannot overlap with another write on it.
+    device.shutdown().await.ok();
+
+    // A pending HID read must not be cancelled and then reused. Detaching lets a
+    // physical disconnect complete it normally; it owns no output path.
+    drop(input_task);
+
+    log::info!("Device task finished for {:?}", candidate);
+}
+
+async fn publish_device_if_current(
+    candidate: &CandidateDevice,
+    device: &Arc<Device>,
+    output: &Arc<DeviceOutput>,
+    token: &Arc<CancellationToken>,
+) -> bool {
+    // Keep the registration read lock until OpenDeck has accepted the device.
+    // A disconnect needs the write lock, so it cannot slip between validation
+    // and publication and leave a ghost registration behind.
+    let tokens = TOKENS.read().await;
+    let token_is_current = tokens
+        .get(&candidate.id)
+        .is_some_and(|registered| Arc::ptr_eq(&registered.token, token));
+
+    if token.is_cancelled() || !token_is_current {
+        return false;
+    }
+
+    DEVICES
+        .write()
+        .await
+        .insert(candidate.id.clone(), device.clone());
+    OUTPUTS
+        .write()
+        .await
+        .insert(candidate.id.clone(), output.clone());
 
     log::info!("Registering device {}", candidate.id);
     if let Some(outbound) = OUTBOUND_EVENT_MANAGER.lock().await.as_mut() {
@@ -61,47 +177,90 @@ pub async fn device_task(candidate: CandidateDevice, token: CancellationToken) {
             .unwrap();
     }
 
-    DEVICES.write().await.insert(candidate.id.clone(), device);
-
-    tokio::select! {
-        _ = device_events_task(&candidate) => {},
-        _ = keepalive_task(&candidate) => {},
-        _ = token.cancelled() => {}
-    };
-
-    log::info!("Shutting down device {:?}", candidate);
-
-    if let Some(device) = DEVICES.read().await.get(&candidate.id) {
-        device.shutdown().await.ok();
-    }
-
-    log::info!("Device task finished for {:?}", candidate);
+    true
 }
 
-/// Handles errors, returning true if should continue, returning false if an error is fatal
-pub async fn handle_error(id: &String, err: MirajazzError) -> bool {
+async fn disconnect_matching(id: &str, expected: SessionMatch<'_>) -> bool {
+    // Hold the registration write lock through local cleanup and the outbound
+    // deregistration. A replacement cannot publish itself until this generation
+    // is completely gone.
+    let mut tokens = TOKENS.write().await;
+    let Some(registered) = tokens.get(id) else {
+        return false;
+    };
+
+    let matches = match expected {
+        SessionMatch::Token(token) => Arc::ptr_eq(&registered.token, token),
+        SessionMatch::Generation(generation) => registered.generation == Some(generation),
+    };
+
+    if !matches {
+        log::debug!("Ignoring stale disconnect from replaced device {}", id);
+        return false;
+    }
+
+    let token = registered.token.clone();
+    token.cancel();
+
+    let removed_output = {
+        let mut outputs = OUTPUTS.write().await;
+        if outputs
+            .get(id)
+            .is_some_and(|output| Arc::ptr_eq(&output.token, &token))
+        {
+            outputs.remove(id)
+        } else {
+            None
+        }
+    };
+
+    let removed_device = if removed_output.is_some() {
+        DEVICES.write().await.remove(id)
+    } else {
+        None
+    };
+
+    if removed_device.is_some() {
+        log::info!("Deregistering device {}", id);
+        if let Some(outbound) = OUTBOUND_EVENT_MANAGER.lock().await.as_mut() {
+            outbound.deregister_device(id.to_owned()).await.ok();
+        }
+    }
+
+    tokens.remove(id);
+    true
+}
+
+async fn disconnect_session(id: &str, expected_token: &Arc<CancellationToken>) -> bool {
+    disconnect_matching(id, SessionMatch::Token(expected_token)).await
+}
+
+pub async fn disconnect_generation(id: &str, generation: u64) -> bool {
+    disconnect_matching(id, SessionMatch::Generation(generation)).await
+}
+
+fn is_nonfatal_error(err: &MirajazzError) -> bool {
+    matches!(err, MirajazzError::ImageError(_) | MirajazzError::BadData)
+}
+
+fn schedule_flush(flush_deadline: &mut Option<Instant>) {
+    flush_deadline.get_or_insert_with(|| Instant::now() + Duration::from_millis(50));
+}
+
+/// Handles a device error. Image conversion errors are nonfatal; HID and
+/// protocol errors discard this connection generation so the watcher can reopen it.
+pub async fn handle_error(
+    id: &str,
+    expected_token: &Arc<CancellationToken>,
+    err: MirajazzError,
+) -> bool {
     log::error!("Device {} error: {}", id, err);
 
-    // Some errors are not critical and can be ignored without sending disconnected event
-    if matches!(err, MirajazzError::ImageError(_) | MirajazzError::BadData) {
+    if is_nonfatal_error(&err) {
         return true;
     }
 
-    log::info!("Deregistering device {}", id);
-    if let Some(outbound) = OUTBOUND_EVENT_MANAGER.lock().await.as_mut() {
-        outbound.deregister_device(id.clone()).await.unwrap();
-    }
-
-    log::info!("Cancelling tasks for device {}", id);
-    if let Some(token) = TOKENS.read().await.get(id) {
-        token.cancel();
-    }
-
-    log::info!("Removing device {} from the list", id);
-    DEVICES.write().await.remove(id);
-
-    log::info!("Finished clean-up for {}", id);
-
+    disconnect_session(id, expected_token).await;
     false
 }
 
@@ -118,25 +277,21 @@ pub async fn connect(candidate: &CandidateDevice) -> Result<Device, MirajazzErro
         Ok(device) => Ok(device),
         Err(e) => {
             log::error!("Error while connecting to device: {e}");
-
             Err(e)
         }
     }
 }
 
 /// Handles events from device to OpenDeck
-async fn device_events_task(candidate: &CandidateDevice) -> Result<(), MirajazzError> {
+async fn device_events_task(
+    candidate: CandidateDevice,
+    device: Arc<Device>,
+    token: Arc<CancellationToken>,
+) -> Result<(), MirajazzError> {
     log::info!("Connecting to {} for incoming events", candidate.id);
-
-    let devices_lock = DEVICES.read().await;
-    let reader = match devices_lock.get(&candidate.id) {
-        Some(device) => device.get_reader(crate::inputs::process_input),
-        None => return Ok(()),
-    };
-    drop(devices_lock);
+    let reader = device.get_reader(crate::inputs::process_input);
 
     log::info!("Connected to {} for incoming events", candidate.id);
-
     log::info!("Reader is ready for {}", candidate.id);
 
     loop {
@@ -145,17 +300,15 @@ async fn device_events_task(candidate: &CandidateDevice) -> Result<(), MirajazzE
         let updates = match reader.read(None).await {
             Ok(updates) => updates,
             Err(e) => {
-                if !handle_error(&candidate.id, e).await {
+                if !handle_error(&candidate.id, &token, e).await {
                     break;
                 }
-
                 continue;
             }
         };
 
         for update in updates {
             log::info!("New update: {:#?}", update);
-
             let id = candidate.id.clone();
 
             if let Some(outbound) = OUTBOUND_EVENT_MANAGER.lock().await.as_mut() {
@@ -182,74 +335,121 @@ async fn device_events_task(candidate: &CandidateDevice) -> Result<(), MirajazzE
     Ok(())
 }
 
-/// Sends periodic keepalives to the device to maintain connection
-async fn keepalive_task(candidate: &CandidateDevice) -> Result<(), MirajazzError> {
-    let mut interval = interval(Duration::from_secs(10));
+enum OutputAction {
+    Command(Option<DeviceCommand>),
+    Flush,
+    KeepAlive,
+    Cancel,
+}
+
+enum OutputStep {
+    Continue,
+    ScheduleFlush,
+    ClearFlush,
+    Stop,
+}
+
+/// Owns all active-session HID writes for one device. The select only chooses
+/// the next action; each HID future is awaited afterward, where cancellation
+/// cannot drop it halfway through an overlapped Windows write.
+async fn device_output_task(
+    id: String,
+    kind: Kind,
+    device: Arc<Device>,
+    mut receiver: mpsc::Receiver<DeviceCommand>,
+    token: Arc<CancellationToken>,
+) -> Result<(), MirajazzError> {
+    let mut keepalive = interval(Duration::from_secs(10));
+    keepalive.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    keepalive.tick().await;
+
+    let mut flush_deadline: Option<Instant> = None;
 
     loop {
-        interval.tick().await;
+        let flush_at =
+            flush_deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(24 * 60 * 60));
 
-        log::info!("Sending keepalive to {}", candidate.id);
-
-        let devices_lock = DEVICES.read().await;
-        let device = match devices_lock.get(&candidate.id) {
-            Some(device) => device,
-            None => return Ok(()),
+        let action = tokio::select! {
+            biased;
+            _ = token.cancelled() => OutputAction::Cancel,
+            _ = sleep_until(flush_at), if flush_deadline.is_some() => OutputAction::Flush,
+            command = receiver.recv() => OutputAction::Command(command),
+            _ = keepalive.tick() => OutputAction::KeepAlive,
         };
 
-        if let Err(e) = device.keep_alive().await {
-            drop(devices_lock);
-            if !handle_error(&candidate.id, e).await {
-                break;
+        let result = match action {
+            OutputAction::Command(Some(DeviceCommand::SetImage { position, image })) => {
+                log::info!("Setting image for button {}", position);
+                device
+                    .set_button_image(
+                        opendeck_to_device(position),
+                        get_image_format_for_key(&kind, position),
+                        image,
+                    )
+                    .await
+                    .map(|_| OutputStep::ScheduleFlush)
+            }
+            OutputAction::Command(Some(DeviceCommand::ClearImage(position))) => device
+                .clear_button_image(opendeck_to_device(position))
+                .await
+                .map(|_| OutputStep::ScheduleFlush),
+            OutputAction::Command(Some(DeviceCommand::ClearAll)) => {
+                match device.clear_all_button_images().await {
+                    Ok(()) => device.flush().await.map(|_| OutputStep::ClearFlush),
+                    Err(err) => Err(err),
+                }
+            }
+            OutputAction::Command(Some(DeviceCommand::SetBrightness(brightness))) => device
+                .set_brightness(brightness)
+                .await
+                .map(|_| OutputStep::Continue),
+            OutputAction::Command(None) | OutputAction::Cancel => Ok(OutputStep::Stop),
+            OutputAction::Flush => {
+                log::debug!("Flushing pending updates for {}", id);
+                device.flush().await.map(|_| OutputStep::ClearFlush)
+            }
+            OutputAction::KeepAlive => {
+                log::info!("Sending keepalive to {}", id);
+                device.keep_alive().await.map(|_| OutputStep::Continue)
+            }
+        };
+
+        match result {
+            Ok(OutputStep::Continue) => {}
+            Ok(OutputStep::ScheduleFlush) => {
+                // Anchor the batch to its first update. A continuous image stream
+                // can no longer postpone flushing forever.
+                schedule_flush(&mut flush_deadline);
+            }
+            Ok(OutputStep::ClearFlush) => flush_deadline = None,
+            Ok(OutputStep::Stop) => return Ok(()),
+            Err(err) if is_nonfatal_error(&err) => {
+                log::error!("Device {} nonfatal output error: {}", id, err);
+            }
+            Err(err) => {
+                return Err(err);
             }
         }
     }
-
-    Ok(())
 }
 
 /// Handles different combinations of "set image" event, including clearing the specific buttons and whole device
-pub async fn handle_set_image(device: &Device, evt: SetImageEvent) -> Result<(), MirajazzError> {
+pub fn command_for_set_image(evt: SetImageEvent) -> Result<Option<DeviceCommand>, MirajazzError> {
     match (evt.position, evt.image) {
         (Some(position), Some(image)) => {
-            log::info!("Setting image for button {}", position);
+            let url = DataUrl::process(image.as_str()).unwrap();
+            let (body, _fragment) = url.decode_to_vec().unwrap();
 
-            // OpenDeck sends image as a data url, so parse it using a library
-            let url = DataUrl::process(image.as_str()).unwrap(); // Isn't expected to fail, so unwrap it is
-            let (body, _fragment) = url.decode_to_vec().unwrap(); // Same here
-
-            // Allow only image/jpeg mime for now
             if url.mime_type().subtype != "jpeg" {
                 log::error!("Incorrect mime type: {}", url.mime_type());
-
-                return Ok(()); // Not a fatal error, enough to just log it
+                return Ok(None);
             }
 
             let image = load_from_memory_with_format(body.as_slice(), image::ImageFormat::Jpeg)?;
-
-            let kind = Kind::from_vid_pid(device.vid, device.pid).unwrap(); // Safe to unwrap here, because device is already filtered
-
-            device
-                .set_button_image(
-                    opendeck_to_device(position),
-                    get_image_format_for_key(&kind, position),
-                    image,
-                )
-                .await?;
-            device.flush().await?;
+            Ok(Some(DeviceCommand::SetImage { position, image }))
         }
-        (Some(position), None) => {
-            device
-                .clear_button_image(opendeck_to_device(position))
-                .await?;
-            device.flush().await?;
-        }
-        (None, None) => {
-            device.clear_all_button_images().await?;
-            device.flush().await?;
-        }
-        _ => {}
+        (Some(position), None) => Ok(Some(DeviceCommand::ClearImage(position))),
+        (None, None) => Ok(Some(DeviceCommand::ClearAll)),
+        _ => Ok(None),
     }
-
-    Ok(())
 }
