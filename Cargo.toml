@@ -1,6 +1,6 @@
 [package]
 name = "opendeck-m18"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 authors = ["ibanks42"]
 repository = "https://github.com/ibanks42/opendeck-m18"

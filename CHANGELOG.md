@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.3] - 2026-08-21
+
+### Fixed
+
+- Hardened M18 HID reconnect handling to improve device recovery after disconnects
+
 ## [0.1.2] - 2026-01-25
 
 ### Added
