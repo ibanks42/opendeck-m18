@@ -24,6 +24,10 @@ The M18 has:
 
 **Note:** OpenDeck displays a 4x5 grid (20 slots), but the M18 only has 18 physical buttons. The last 2 slots in the bottom row are unused and do not correspond to any button on the device.
 
+## RGB LED control
+
+Add the **Set LED Colors** action to a keypad button to configure the M18's 24 RGB LEDs. Its Property Inspector follows the physical LED layout and can set each LED independently or apply one color to all LEDs.
+
 ## Platform support
 
 - Linux: Primary development platform
