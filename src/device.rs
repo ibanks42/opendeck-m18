@@ -1,23 +1,24 @@
-use std::{sync::Arc, time::Duration};
+use std::{future::Future, sync::Arc, time::Duration};
 
 use data_url::DataUrl;
 use image::{DynamicImage, load_from_memory_with_format};
 use mirajazz::{device::Device, error::MirajazzError, state::DeviceStateUpdate};
 use openaction::{OUTBOUND_EVENT_MANAGER, SetImageEvent};
 use tokio::{
-    sync::mpsc,
+    sync::{RwLock, mpsc},
     time::{Instant, MissedTickBehavior, interval, sleep_until},
 };
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    DEVICES, OUTPUTS, TOKENS,
+    SESSIONS,
     inputs::opendeck_to_device,
     mappings::{
         COL_COUNT, CandidateDevice, ENCODER_COUNT, KEY_COUNT, Kind, ROW_COUNT,
         get_image_format_for_key,
     },
     palette::LedPalette,
+    session::{Removal, SessionMatch, SessionRegistry},
 };
 
 pub enum DeviceCommand {
@@ -32,11 +33,6 @@ pub struct DeviceOutput {
     pub id: String,
     pub token: Arc<CancellationToken>,
     sender: mpsc::Sender<DeviceCommand>,
-}
-
-enum SessionMatch<'a> {
-    Token(&'a Arc<CancellationToken>),
-    Generation(u64),
 }
 
 impl DeviceOutput {
@@ -83,10 +79,18 @@ pub async fn device_task(candidate: CandidateDevice, token: Arc<CancellationToke
         sender,
     });
 
-    if !publish_device_if_current(&candidate, &device, &output, &token).await {
-        log::debug!("Discarding cancelled connection for {}", candidate.id);
-        device.shutdown().await.ok();
-        return;
+    match publish_device_if_current(&candidate, &device, &output, &token).await {
+        PublicationOutcome::Published => {}
+        PublicationOutcome::Stale => {
+            log::debug!("Discarding cancelled connection for {}", candidate.id);
+            device.shutdown().await.ok();
+            return;
+        }
+        PublicationOutcome::RegistrationFailed(error) => {
+            log::error!("Unable to register device {}: {}", candidate.id, error);
+            device.shutdown().await.ok();
+            return;
+        }
     }
 
     let mut output_task = tokio::spawn(device_output_task(
@@ -137,100 +141,144 @@ pub async fn device_task(candidate: CandidateDevice, token: Arc<CancellationToke
     log::info!("Device task finished for {:?}", candidate);
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum PublicationOutcome {
+    Published,
+    Stale,
+    RegistrationFailed(String),
+}
+
+async fn publish_with<D, O, Register, RegisterFuture, Deregister, DeregisterFuture>(
+    sessions: &RwLock<SessionRegistry<D, O>>,
+    id: &str,
+    device: D,
+    output: O,
+    token: &Arc<CancellationToken>,
+    register: Register,
+    deregister: Deregister,
+) -> PublicationOutcome
+where
+    Register: FnOnce() -> RegisterFuture,
+    RegisterFuture: Future<Output = Result<(), String>>,
+    Deregister: FnOnce(String) -> DeregisterFuture,
+    DeregisterFuture: Future<Output = Result<(), String>>,
+{
+    if sessions
+        .write()
+        .await
+        .begin_registration(id, token, device, output)
+        .is_err()
+    {
+        sessions
+            .write()
+            .await
+            .begin_removal(id, SessionMatch::Token(token));
+        return PublicationOutcome::Stale;
+    }
+
+    if let Err(error) = register().await {
+        sessions.write().await.discard_registration(id, token);
+        return PublicationOutcome::RegistrationFailed(error);
+    }
+
+    if sessions.write().await.finish_registration(id, token) {
+        return PublicationOutcome::Published;
+    }
+
+    if let Err(error) = deregister(id.to_owned()).await {
+        log::error!(
+            "Unable to roll back stale OpenDeck registration for {}: {}",
+            id,
+            error
+        );
+    }
+    sessions.write().await.discard_registration(id, token);
+    PublicationOutcome::Stale
+}
+
+async fn register_opendeck_device(candidate: &CandidateDevice) -> Result<(), String> {
+    let mut manager = OUTBOUND_EVENT_MANAGER.lock().await;
+    let outbound = manager
+        .as_mut()
+        .ok_or_else(|| "OpenDeck outbound connection is unavailable".to_string())?;
+
+    outbound
+        .register_device(
+            candidate.id.clone(),
+            candidate.kind.human_name(),
+            ROW_COUNT as u8,
+            COL_COUNT as u8,
+            ENCODER_COUNT as u8,
+            0,
+        )
+        .await
+        .map_err(|error| error.to_string())
+}
+
 async fn publish_device_if_current(
     candidate: &CandidateDevice,
     device: &Arc<Device>,
     output: &Arc<DeviceOutput>,
     token: &Arc<CancellationToken>,
-) -> bool {
-    // Keep the registration read lock until OpenDeck has accepted the device.
-    // A disconnect needs the write lock, so it cannot slip between validation
-    // and publication and leave a ghost registration behind.
-    let tokens = TOKENS.read().await;
-    let token_is_current = tokens
-        .get(&candidate.id)
-        .is_some_and(|registered| Arc::ptr_eq(&registered.token, token));
-
-    if token.is_cancelled() || !token_is_current {
-        return false;
-    }
-
-    DEVICES
-        .write()
-        .await
-        .insert(candidate.id.clone(), device.clone());
-    OUTPUTS
-        .write()
-        .await
-        .insert(candidate.id.clone(), output.clone());
-
+) -> PublicationOutcome {
     log::info!("Registering device {}", candidate.id);
-    if let Some(outbound) = OUTBOUND_EVENT_MANAGER.lock().await.as_mut() {
-        outbound
-            .register_device(
-                candidate.id.clone(),
-                candidate.kind.human_name(),
-                ROW_COUNT as u8,
-                COL_COUNT as u8,
-                ENCODER_COUNT as u8,
-                0,
-            )
-            .await
-            .unwrap();
+    publish_with(
+        &SESSIONS,
+        &candidate.id,
+        device.clone(),
+        output.clone(),
+        token,
+        || register_opendeck_device(candidate),
+        deregister_opendeck_device,
+    )
+    .await
+}
+
+async fn deregister_opendeck_device(id: String) -> Result<(), String> {
+    let mut manager = OUTBOUND_EVENT_MANAGER.lock().await;
+    let outbound = manager
+        .as_mut()
+        .ok_or_else(|| "OpenDeck outbound connection is unavailable".to_string())?;
+    outbound
+        .deregister_device(id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn disconnect_matching_with<D, O, F, Fut>(
+    sessions: &RwLock<SessionRegistry<D, O>>,
+    id: &str,
+    expected: SessionMatch<'_>,
+    deregister: F,
+) -> bool
+where
+    F: FnOnce(String) -> Fut,
+    Fut: Future<Output = Result<(), String>>,
+{
+    let Some(removal) = sessions.write().await.begin_removal(id, expected) else {
+        log::debug!("Ignoring stale disconnect from replaced device {}", id);
+        return false;
+    };
+    let Removal::Ready(removed) = removal else {
+        return true;
+    };
+
+    if removed.device.is_some() {
+        log::info!("Deregistering device {}", id);
+        if let Err(error) = deregister(id.to_owned()).await {
+            log::error!("Unable to deregister device {}: {}", id, error);
+        }
     }
 
+    if removed.cleanup_pending {
+        sessions.write().await.finish_cleanup(id, &removed.token);
+    }
+    drop(removed.output);
     true
 }
 
 async fn disconnect_matching(id: &str, expected: SessionMatch<'_>) -> bool {
-    // Hold the registration write lock through local cleanup and the outbound
-    // deregistration. A replacement cannot publish itself until this generation
-    // is completely gone.
-    let mut tokens = TOKENS.write().await;
-    let Some(registered) = tokens.get(id) else {
-        return false;
-    };
-
-    let matches = match expected {
-        SessionMatch::Token(token) => Arc::ptr_eq(&registered.token, token),
-        SessionMatch::Generation(generation) => registered.generation == Some(generation),
-    };
-
-    if !matches {
-        log::debug!("Ignoring stale disconnect from replaced device {}", id);
-        return false;
-    }
-
-    let token = registered.token.clone();
-    token.cancel();
-
-    let removed_output = {
-        let mut outputs = OUTPUTS.write().await;
-        if outputs
-            .get(id)
-            .is_some_and(|output| Arc::ptr_eq(&output.token, &token))
-        {
-            outputs.remove(id)
-        } else {
-            None
-        }
-    };
-
-    let removed_device = if removed_output.is_some() {
-        DEVICES.write().await.remove(id)
-    } else {
-        None
-    };
-
-    if removed_device.is_some() {
-        log::info!("Deregistering device {}", id);
-        if let Some(outbound) = OUTBOUND_EVENT_MANAGER.lock().await.as_mut() {
-            outbound.deregister_device(id.to_owned()).await.ok();
-        }
-    }
-
-    tokens.remove(id);
-    true
+    disconnect_matching_with(&SESSIONS, id, expected, deregister_opendeck_device).await
 }
 
 async fn disconnect_session(id: &str, expected_token: &Arc<CancellationToken>) -> bool {
@@ -284,6 +332,71 @@ pub async fn connect(candidate: &CandidateDevice) -> Result<Device, MirajazzErro
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum InputEvent {
+    KeyDown(String, u8),
+    KeyUp(String, u8),
+    EncoderDown(String, u8),
+    EncoderUp(String, u8),
+    EncoderChange(String, u8, i16),
+}
+
+impl InputEvent {
+    fn from_update(id: &str, update: DeviceStateUpdate) -> Self {
+        match update {
+            DeviceStateUpdate::ButtonDown(key) => Self::KeyDown(id.to_owned(), key),
+            DeviceStateUpdate::ButtonUp(key) => Self::KeyUp(id.to_owned(), key),
+            DeviceStateUpdate::EncoderDown(encoder) => Self::EncoderDown(id.to_owned(), encoder),
+            DeviceStateUpdate::EncoderUp(encoder) => Self::EncoderUp(id.to_owned(), encoder),
+            DeviceStateUpdate::EncoderTwist(encoder, value) => {
+                Self::EncoderChange(id.to_owned(), encoder, value as i16)
+            }
+        }
+    }
+}
+
+async fn send_opendeck_input(event: InputEvent) -> Result<(), String> {
+    let mut manager = OUTBOUND_EVENT_MANAGER.lock().await;
+    let outbound = manager
+        .as_mut()
+        .ok_or_else(|| "OpenDeck outbound connection is unavailable".to_string())?;
+
+    let result = match event {
+        InputEvent::KeyDown(id, key) => outbound.key_down(id, key).await,
+        InputEvent::KeyUp(id, key) => outbound.key_up(id, key).await,
+        InputEvent::EncoderDown(id, encoder) => outbound.encoder_down(id, encoder).await,
+        InputEvent::EncoderUp(id, encoder) => outbound.encoder_up(id, encoder).await,
+        InputEvent::EncoderChange(id, encoder, value) => {
+            outbound.encoder_change(id, encoder, value).await
+        }
+    };
+
+    result.map_err(|error| error.to_string())
+}
+
+async fn deliver_input_with<D, O, S, SendFuture, R, DeregisterFuture>(
+    sessions: &RwLock<SessionRegistry<D, O>>,
+    id: &str,
+    token: &Arc<CancellationToken>,
+    event: InputEvent,
+    send: S,
+    deregister: R,
+) -> bool
+where
+    S: FnOnce(InputEvent) -> SendFuture,
+    SendFuture: Future<Output = Result<(), String>>,
+    R: FnOnce(String) -> DeregisterFuture,
+    DeregisterFuture: Future<Output = Result<(), String>>,
+{
+    if let Err(error) = send(event).await {
+        log::error!("Unable to deliver input event for device {}: {}", id, error);
+        disconnect_matching_with(sessions, id, SessionMatch::Token(token), deregister).await;
+        return false;
+    }
+
+    true
+}
+
 /// Handles events from device to OpenDeck
 async fn device_events_task(
     candidate: CandidateDevice,
@@ -309,27 +422,29 @@ async fn device_events_task(
             }
         };
 
-        for update in updates {
-            log::info!("New update: {:#?}", update);
-            let id = candidate.id.clone();
+        if token.is_cancelled() {
+            break;
+        }
 
-            if let Some(outbound) = OUTBOUND_EVENT_MANAGER.lock().await.as_mut() {
-                match update {
-                    DeviceStateUpdate::ButtonDown(key) => outbound.key_down(id, key).await.unwrap(),
-                    DeviceStateUpdate::ButtonUp(key) => outbound.key_up(id, key).await.unwrap(),
-                    DeviceStateUpdate::EncoderDown(encoder) => {
-                        outbound.encoder_down(id, encoder).await.unwrap();
-                    }
-                    DeviceStateUpdate::EncoderUp(encoder) => {
-                        outbound.encoder_up(id, encoder).await.unwrap();
-                    }
-                    DeviceStateUpdate::EncoderTwist(encoder, val) => {
-                        outbound
-                            .encoder_change(id, encoder, val as i16)
-                            .await
-                            .unwrap();
-                    }
-                }
+        for update in updates {
+            if token.is_cancelled() {
+                return Ok(());
+            }
+
+            log::info!("New update: {:#?}", update);
+            let event = InputEvent::from_update(&candidate.id, update);
+
+            if !deliver_input_with(
+                &SESSIONS,
+                &candidate.id,
+                &token,
+                event,
+                send_opendeck_input,
+                deregister_opendeck_device,
+            )
+            .await
+            {
+                return Ok(());
             }
         }
     }
@@ -513,9 +628,14 @@ pub fn command_for_set_image(evt: SetImageEvent) -> Result<Option<DeviceCommand>
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex as StdMutex;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use tokio::sync::{Notify, RwLock};
 
     use super::*;
-    use tokio::sync::Notify;
 
     #[derive(Default)]
     struct RecordingDevice {
@@ -641,5 +761,274 @@ mod tests {
                 "keepalive:end",
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn registration_failure_rolls_back_the_session() {
+        let sessions = RwLock::new(SessionRegistry::<&str, &str>::default());
+        let token = sessions
+            .write()
+            .await
+            .reserve("device".to_string(), 1)
+            .unwrap();
+
+        let outcome = publish_with(
+            &sessions,
+            "device",
+            "device handle",
+            "output handle",
+            &token,
+            || async { Err("connection closed".to_string()) },
+            |_| async { Ok(()) },
+        )
+        .await;
+
+        assert_eq!(
+            outcome,
+            PublicationOutcome::RegistrationFailed("connection closed".to_string())
+        );
+        assert!(token.is_cancelled());
+        let sessions = sessions.read().await;
+        assert!(!sessions.is_current("device", &token));
+        assert!(sessions.output("device").is_none());
+    }
+
+    #[tokio::test]
+    async fn disconnect_during_registration_rolls_back_before_replacement() {
+        let sessions = RwLock::new(SessionRegistry::<&str, &str>::default());
+        let token = sessions
+            .write()
+            .await
+            .reserve("device".to_string(), 1)
+            .unwrap();
+        let deregistrations = Arc::new(AtomicUsize::new(0));
+        let deregistrations_for_cleanup = deregistrations.clone();
+
+        let outcome = publish_with(
+            &sessions,
+            "device",
+            "device handle",
+            "output handle",
+            &token,
+            || async {
+                assert_eq!(
+                    sessions.read().await.output("device"),
+                    Some(&"output handle")
+                );
+                assert!(matches!(
+                    sessions
+                        .write()
+                        .await
+                        .begin_removal("device", SessionMatch::Generation(1)),
+                    Some(Removal::RegistrationPending)
+                ));
+                assert!(
+                    sessions
+                        .write()
+                        .await
+                        .reserve("device".to_string(), 2)
+                        .is_none()
+                );
+                Ok(())
+            },
+            move |_| async move {
+                deregistrations_for_cleanup.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            },
+        )
+        .await;
+
+        assert_eq!(outcome, PublicationOutcome::Stale);
+        assert!(token.is_cancelled());
+        assert_eq!(deregistrations.load(Ordering::Relaxed), 1);
+        assert!(
+            sessions
+                .write()
+                .await
+                .reserve("device".to_string(), 2)
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn deregistration_runs_without_holding_the_session_lock() {
+        let sessions = RwLock::new(SessionRegistry::<&str, &str>::default());
+        let token = sessions
+            .write()
+            .await
+            .reserve("device".to_string(), 1)
+            .unwrap();
+        assert_eq!(
+            publish_with(
+                &sessions,
+                "device",
+                "device handle",
+                "output handle",
+                &token,
+                || async { Ok(()) },
+                |_| async { Ok(()) },
+            )
+            .await,
+            PublicationOutcome::Published
+        );
+
+        assert!(
+            disconnect_matching_with(
+                &sessions,
+                "device",
+                SessionMatch::Token(&token),
+                |_| async {
+                    assert!(sessions.read().await.output("device").is_none());
+                    Ok(())
+                },
+            )
+            .await
+        );
+        assert!(!sessions.read().await.is_current("device", &token));
+    }
+
+    #[tokio::test]
+    async fn every_input_delivery_failure_removes_the_published_session() {
+        let cases = [
+            (
+                DeviceStateUpdate::ButtonDown(1),
+                InputEvent::KeyDown("device".to_string(), 1),
+            ),
+            (
+                DeviceStateUpdate::ButtonUp(2),
+                InputEvent::KeyUp("device".to_string(), 2),
+            ),
+            (
+                DeviceStateUpdate::EncoderDown(3),
+                InputEvent::EncoderDown("device".to_string(), 3),
+            ),
+            (
+                DeviceStateUpdate::EncoderUp(4),
+                InputEvent::EncoderUp("device".to_string(), 4),
+            ),
+            (
+                DeviceStateUpdate::EncoderTwist(5, -2),
+                InputEvent::EncoderChange("device".to_string(), 5, -2),
+            ),
+        ];
+
+        for (update, expected_event) in cases {
+            let sessions = RwLock::new(SessionRegistry::<&str, &str>::default());
+            let token = sessions
+                .write()
+                .await
+                .reserve("device".to_string(), 1)
+                .unwrap();
+            assert_eq!(
+                publish_with(
+                    &sessions,
+                    "device",
+                    "device handle",
+                    "output handle",
+                    &token,
+                    || async { Ok(()) },
+                    |_| async { Ok(()) },
+                )
+                .await,
+                PublicationOutcome::Published
+            );
+
+            let deregistrations = Arc::new(AtomicUsize::new(0));
+            let deregistrations_for_cleanup = deregistrations.clone();
+            let delivered = deliver_input_with(
+                &sessions,
+                "device",
+                &token,
+                InputEvent::from_update("device", update),
+                move |event| async move {
+                    assert_eq!(event, expected_event);
+                    Err("connection closed".to_string())
+                },
+                move |id| async move {
+                    assert_eq!(id, "device");
+                    deregistrations_for_cleanup.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                },
+            )
+            .await;
+
+            assert!(!delivered);
+            assert!(token.is_cancelled());
+            assert_eq!(deregistrations.load(Ordering::Relaxed), 1);
+            let sessions = sessions.read().await;
+            assert!(!sessions.is_current("device", &token));
+            assert!(sessions.output("device").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_generation_cleanup_cannot_remove_a_replacement() {
+        let sessions = RwLock::new(SessionRegistry::<&str, &str>::default());
+        let old_token = sessions
+            .write()
+            .await
+            .reserve("device".to_string(), 1)
+            .unwrap();
+        assert_eq!(
+            publish_with(
+                &sessions,
+                "device",
+                "old device",
+                "old output",
+                &old_token,
+                || async { Ok(()) },
+                |_| async { Ok(()) },
+            )
+            .await,
+            PublicationOutcome::Published
+        );
+        assert!(
+            disconnect_matching_with(
+                &sessions,
+                "device",
+                SessionMatch::Generation(1),
+                |_| async { Ok(()) },
+            )
+            .await
+        );
+
+        let replacement_token = sessions
+            .write()
+            .await
+            .reserve("device".to_string(), 2)
+            .unwrap();
+        assert_eq!(
+            publish_with(
+                &sessions,
+                "device",
+                "replacement device",
+                "replacement output",
+                &replacement_token,
+                || async { Ok(()) },
+                |_| async { Ok(()) },
+            )
+            .await,
+            PublicationOutcome::Published
+        );
+        let deregistrations = Arc::new(AtomicUsize::new(0));
+        let deregistrations_for_cleanup = deregistrations.clone();
+
+        assert!(
+            !disconnect_matching_with(
+                &sessions,
+                "device",
+                SessionMatch::Generation(1),
+                move |_| async move {
+                    deregistrations_for_cleanup.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                },
+            )
+            .await
+        );
+        assert_eq!(deregistrations.load(Ordering::Relaxed), 0);
+        assert!(!replacement_token.is_cancelled());
+        let sessions = sessions.read().await;
+        assert!(sessions.is_current("device", &replacement_token));
+        assert_eq!(sessions.output("device"), Some(&"replacement output"));
     }
 }

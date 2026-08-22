@@ -5,7 +5,6 @@ use palette::{
     ACTION_UUID, DEFAULT_PALETTE, action_settings, palette_from_settings, settings_need_default,
 };
 use std::{
-    collections::HashMap,
     process::exit,
     sync::{Arc, LazyLock},
 };
@@ -20,23 +19,15 @@ mod device;
 mod inputs;
 mod mappings;
 mod palette;
+mod session;
 mod watcher;
 
-pub static DEVICES: LazyLock<RwLock<HashMap<String, Arc<Device>>>> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
-pub struct TaskRegistration {
-    pub token: Arc<CancellationToken>,
-    pub generation: Option<u64>,
-}
-
-pub static TOKENS: LazyLock<RwLock<HashMap<String, TaskRegistration>>> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
-pub static OUTPUTS: LazyLock<RwLock<HashMap<String, Arc<DeviceOutput>>>> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
+pub static SESSIONS: LazyLock<RwLock<session::SessionRegistry<Arc<Device>, Arc<DeviceOutput>>>> =
+    LazyLock::new(|| RwLock::new(session::SessionRegistry::default()));
 pub static TRACKER: LazyLock<Mutex<TaskTracker>> = LazyLock::new(|| Mutex::new(TaskTracker::new()));
 
 async fn send_device_command(device_id: &str, command: DeviceCommand) {
-    let output = OUTPUTS.read().await.get(device_id).cloned();
+    let output = SESSIONS.read().await.output(device_id).cloned();
 
     if let Some(output) = output {
         if output.send(command).await.is_err() {
@@ -59,13 +50,10 @@ impl openaction::GlobalEventHandler for GlobalEventHandler {
         let token = Arc::new(CancellationToken::new());
         tracker.spawn(watcher_task(token.clone()));
 
-        TOKENS.write().await.insert(
-            "_watcher_task".to_string(),
-            TaskRegistration {
-                token,
-                generation: None,
-            },
-        );
+        SESSIONS
+            .write()
+            .await
+            .insert_task("_watcher_task".to_string(), token);
 
         log::info!("Plugin initialized");
 
@@ -85,7 +73,7 @@ impl openaction::GlobalEventHandler for GlobalEventHandler {
             return Ok(());
         }
 
-        let output = OUTPUTS.read().await.get(&event.device).cloned();
+        let output = SESSIONS.read().await.output(&event.device).cloned();
 
         if let Some(output) = output {
             match command_for_set_image(event) {
@@ -112,7 +100,7 @@ impl openaction::GlobalEventHandler for GlobalEventHandler {
     ) -> EventHandlerResult {
         log::debug!("Asked to set brightness: {:#?}", event);
 
-        let output = OUTPUTS.read().await.get(&event.device).cloned();
+        let output = SESSIONS.read().await.output(&event.device).cloned();
 
         if let Some(output) = output {
             if output
@@ -171,11 +159,7 @@ impl openaction::ActionEventHandler for ActionEventHandler {
 }
 
 async fn shutdown() {
-    let tokens = TOKENS.write().await;
-
-    for registration in tokens.values() {
-        registration.token.cancel();
-    }
+    SESSIONS.read().await.cancel_all();
 }
 
 async fn connect() {
