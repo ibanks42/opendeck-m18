@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.4] - 2026-08-22
+
+### Added
+
+- RGB LED color control action
+- Per-session button event reporting
+
+### Fixed
+
+- Device lifecycle error handling
+
 ## [0.1.3] - 2026-08-21
 
 ### Fixed
