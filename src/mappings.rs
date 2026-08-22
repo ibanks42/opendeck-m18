@@ -95,3 +95,24 @@ pub struct CandidateDevice {
     pub dev: HidDeviceInfo,
     pub kind: Kind,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_supported_m18_variants_remain_mapped() {
+        assert!(matches!(
+            Kind::from_vid_pid(VSDINSIDE_VID, VSDINSIDE_M18_PID),
+            Some(Kind::VsdInsideM18)
+        ));
+        assert!(matches!(
+            Kind::from_vid_pid(MIRABOX_VID, MIRABOX_M18_PID),
+            Some(Kind::MiraboxM18)
+        ));
+        assert!(matches!(
+            Kind::from_vid_pid(MIRABOX_VID, MIRABOX_M18EN_PID),
+            Some(Kind::MiraboxM18)
+        ));
+    }
+}

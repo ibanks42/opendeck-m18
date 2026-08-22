@@ -2,7 +2,7 @@ use std::{future::Future, sync::Arc, time::Duration};
 
 use data_url::DataUrl;
 use image::{DynamicImage, load_from_memory_with_format};
-use mirajazz::{device::Device, error::MirajazzError, state::DeviceStateUpdate};
+use mirajazz::{device::Device, error::MirajazzError, types::DeviceInput};
 use openaction::{OUTBOUND_EVENT_MANAGER, SetImageEvent};
 use tokio::{
     sync::{RwLock, mpsc},
@@ -10,9 +10,12 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+#[cfg(test)]
+use mirajazz::state::DeviceStateUpdate;
+
 use crate::{
     SESSIONS,
-    inputs::opendeck_to_device,
+    inputs::{ButtonEvent, ButtonSession, opendeck_to_device},
     mappings::{
         COL_COUNT, CandidateDevice, ENCODER_COUNT, KEY_COUNT, Kind, ROW_COUNT,
         get_image_format_for_key,
@@ -32,6 +35,7 @@ pub enum DeviceCommand {
 pub struct DeviceOutput {
     pub id: String,
     pub token: Arc<CancellationToken>,
+    input_gate: Arc<RwLock<()>>,
     sender: mpsc::Sender<DeviceCommand>,
 }
 
@@ -73,9 +77,11 @@ pub async fn device_task(candidate: CandidateDevice, token: Arc<CancellationToke
 
     let device = Arc::new(device);
     let (sender, receiver) = mpsc::channel(128);
+    let input_session = ButtonSession::new();
     let output = Arc::new(DeviceOutput {
         id: candidate.id.clone(),
         token: token.clone(),
+        input_gate: input_session.gate(),
         sender,
     });
 
@@ -104,6 +110,7 @@ pub async fn device_task(candidate: CandidateDevice, token: Arc<CancellationToke
         candidate.clone(),
         device.clone(),
         token.clone(),
+        input_session,
     ));
 
     let output_finished = tokio::select! {
@@ -245,13 +252,15 @@ async fn deregister_opendeck_device(id: String) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
-async fn disconnect_matching_with<D, O, F, Fut>(
+async fn disconnect_matching_with<D, O, Drain, F, Fut>(
     sessions: &RwLock<SessionRegistry<D, O>>,
     id: &str,
     expected: SessionMatch<'_>,
+    input_gate: Drain,
     deregister: F,
 ) -> bool
 where
+    Drain: FnOnce(&O) -> Option<Arc<RwLock<()>>>,
     F: FnOnce(String) -> Fut,
     Fut: Future<Output = Result<(), String>>,
 {
@@ -261,6 +270,12 @@ where
     };
     let Removal::Ready(removed) = removal else {
         return true;
+    };
+
+    let input_gate = removed.output.as_ref().and_then(input_gate);
+    let _input_guard = match input_gate {
+        Some(gate) => Some(gate.write_owned().await),
+        None => None,
     };
 
     if removed.device.is_some() {
@@ -278,7 +293,14 @@ where
 }
 
 async fn disconnect_matching(id: &str, expected: SessionMatch<'_>) -> bool {
-    disconnect_matching_with(&SESSIONS, id, expected, deregister_opendeck_device).await
+    disconnect_matching_with(
+        &SESSIONS,
+        id,
+        expected,
+        |output| Some(output.input_gate.clone()),
+        deregister_opendeck_device,
+    )
+    .await
 }
 
 async fn disconnect_session(id: &str, expected_token: &Arc<CancellationToken>) -> bool {
@@ -336,12 +358,16 @@ pub async fn connect(candidate: &CandidateDevice) -> Result<Device, MirajazzErro
 enum InputEvent {
     KeyDown(String, u8),
     KeyUp(String, u8),
+    #[cfg(test)]
     EncoderDown(String, u8),
+    #[cfg(test)]
     EncoderUp(String, u8),
+    #[cfg(test)]
     EncoderChange(String, u8, i16),
 }
 
 impl InputEvent {
+    #[cfg(test)]
     fn from_update(id: &str, update: DeviceStateUpdate) -> Self {
         match update {
             DeviceStateUpdate::ButtonDown(key) => Self::KeyDown(id.to_owned(), key),
@@ -364,8 +390,11 @@ async fn send_opendeck_input(event: InputEvent) -> Result<(), String> {
     let result = match event {
         InputEvent::KeyDown(id, key) => outbound.key_down(id, key).await,
         InputEvent::KeyUp(id, key) => outbound.key_up(id, key).await,
+        #[cfg(test)]
         InputEvent::EncoderDown(id, encoder) => outbound.encoder_down(id, encoder).await,
+        #[cfg(test)]
         InputEvent::EncoderUp(id, encoder) => outbound.encoder_up(id, encoder).await,
+        #[cfg(test)]
         InputEvent::EncoderChange(id, encoder, value) => {
             outbound.encoder_change(id, encoder, value).await
         }
@@ -374,6 +403,7 @@ async fn send_opendeck_input(event: InputEvent) -> Result<(), String> {
     result.map_err(|error| error.to_string())
 }
 
+#[cfg(test)]
 async fn deliver_input_with<D, O, S, SendFuture, R, DeregisterFuture>(
     sessions: &RwLock<SessionRegistry<D, O>>,
     id: &str,
@@ -390,7 +420,14 @@ where
 {
     if let Err(error) = send(event).await {
         log::error!("Unable to deliver input event for device {}: {}", id, error);
-        disconnect_matching_with(sessions, id, SessionMatch::Token(token), deregister).await;
+        disconnect_matching_with(
+            sessions,
+            id,
+            SessionMatch::Token(token),
+            |_| None,
+            deregister,
+        )
+        .await;
         return false;
     }
 
@@ -402,9 +439,11 @@ async fn device_events_task(
     candidate: CandidateDevice,
     device: Arc<Device>,
     token: Arc<CancellationToken>,
+    mut session: ButtonSession,
 ) -> Result<(), MirajazzError> {
     log::info!("Connecting to {} for incoming events", candidate.id);
-    let reader = device.get_reader(crate::inputs::process_input);
+    let reader = device.get_reader(|_, _| Ok(DeviceInput::NoData));
+    let mut sink = OpenDeckKeyEventSink;
 
     log::info!("Connected to {} for incoming events", candidate.id);
     log::info!("Reader is ready for {}", candidate.id);
@@ -412,8 +451,8 @@ async fn device_events_task(
     loop {
         log::info!("Reading updates...");
 
-        let updates = match reader.read(None).await {
-            Ok(updates) => updates,
+        let report = match reader.raw_read_data(512).await {
+            Ok(report) => report,
             Err(e) => {
                 if !handle_error(&candidate.id, &token, e).await {
                     break;
@@ -422,34 +461,79 @@ async fn device_events_task(
             }
         };
 
-        if token.is_cancelled() {
-            break;
-        }
-
-        for update in updates {
-            if token.is_cancelled() {
-                return Ok(());
-            }
-
-            log::info!("New update: {:#?}", update);
-            let event = InputEvent::from_update(&candidate.id, update);
-
-            if !deliver_input_with(
-                &SESSIONS,
-                &candidate.id,
-                &token,
-                event,
-                send_opendeck_input,
-                deregister_opendeck_device,
-            )
-            .await
-            {
-                return Ok(());
+        match process_session_report(&candidate.id, &token, &mut session, &report, &mut sink).await
+        {
+            Ok(ReportStatus::Current) => {}
+            Ok(ReportStatus::Stale) => break,
+            Err(e) => {
+                if !handle_error(&candidate.id, &token, e).await {
+                    break;
+                }
             }
         }
     }
 
     Ok(())
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum ReportStatus {
+    Current,
+    Stale,
+}
+
+trait KeyEventSink {
+    async fn emit(&mut self, id: &str, event: ButtonEvent) -> Result<(), String>;
+}
+
+struct OpenDeckKeyEventSink;
+
+impl KeyEventSink for OpenDeckKeyEventSink {
+    async fn emit(&mut self, id: &str, event: ButtonEvent) -> Result<(), String> {
+        let event = match event {
+            ButtonEvent::Down(position) => InputEvent::KeyDown(id.to_owned(), position),
+            ButtonEvent::Up(position) => InputEvent::KeyUp(id.to_owned(), position),
+        };
+        send_opendeck_input(event).await
+    }
+}
+
+async fn process_session_report<S: KeyEventSink>(
+    id: &str,
+    token: &Arc<CancellationToken>,
+    session: &mut ButtonSession,
+    report: &[u8],
+    sink: &mut S,
+) -> Result<ReportStatus, MirajazzError> {
+    let is_current = { !token.is_cancelled() && SESSIONS.read().await.is_current(id, token) };
+
+    if !is_current {
+        return Ok(ReportStatus::Stale);
+    }
+
+    // Disconnect takes this session-owned gate before a replacement can be
+    // published, so an old reader cannot emit under the replacement's id.
+    let input_gate = session.gate();
+    let input_guard = input_gate.read().await;
+    if token.is_cancelled() {
+        return Ok(ReportStatus::Stale);
+    }
+
+    let Some(event) = session.process_report(report)? else {
+        return Ok(ReportStatus::Current);
+    };
+
+    log::info!("New update: {:#?}", event);
+    let result = sink.emit(id, event).await;
+    drop(input_guard);
+
+    if let Err(error) = result {
+        log::error!("Unable to deliver input event for device {}: {}", id, error);
+        disconnect_session(id, token).await;
+        return Ok(ReportStatus::Stale);
+    }
+
+    Ok(ReportStatus::Current)
 }
 
 enum OutputAction {
@@ -877,6 +961,7 @@ mod tests {
                 &sessions,
                 "device",
                 SessionMatch::Token(&token),
+                |_| None,
                 |_| async {
                     assert!(sessions.read().await.output("device").is_none());
                     Ok(())
@@ -987,6 +1072,7 @@ mod tests {
                 &sessions,
                 "device",
                 SessionMatch::Generation(1),
+                |_| None,
                 |_| async { Ok(()) },
             )
             .await
@@ -1018,6 +1104,7 @@ mod tests {
                 &sessions,
                 "device",
                 SessionMatch::Generation(1),
+                |_| None,
                 move |_| async move {
                     deregistrations_for_cleanup.fetch_add(1, Ordering::Relaxed);
                     Ok(())
@@ -1030,5 +1117,337 @@ mod tests {
         let sessions = sessions.read().await;
         assert!(sessions.is_current("device", &replacement_token));
         assert_eq!(sessions.output("device"), Some(&"replacement output"));
+    }
+
+    use crate::inputs::{BTN_LEFT, BTN_MIDDLE, BTN_RIGHT};
+    use tokio::time::timeout;
+
+    #[derive(Default)]
+    struct FakeKeyEventSink {
+        events: Vec<(String, ButtonEvent)>,
+    }
+
+    impl KeyEventSink for FakeKeyEventSink {
+        async fn emit(&mut self, id: &str, event: ButtonEvent) -> Result<(), String> {
+            self.events.push((id.to_owned(), event));
+            Ok(())
+        }
+    }
+
+    fn report(input: u8, state: u8) -> Vec<u8> {
+        let mut report = vec![0; 11];
+        report[0..3].copy_from_slice(&[65, 67, 75]);
+        report[9] = input;
+        report[10] = state;
+        report
+    }
+
+    async fn register(id: &str, token: &Arc<CancellationToken>, _generation: u64) {
+        SESSIONS
+            .write()
+            .await
+            .insert_task(id.to_owned(), token.clone());
+    }
+
+    async fn send_report(
+        id: &str,
+        token: &Arc<CancellationToken>,
+        session: &mut ButtonSession,
+        sink: &mut FakeKeyEventSink,
+        input: u8,
+        state: u8,
+    ) -> Result<ReportStatus, MirajazzError> {
+        process_session_report(id, token, session, &report(input, state), sink).await
+    }
+
+    async fn cleanup(id: &str, token: &Arc<CancellationToken>) {
+        SESSIONS
+            .write()
+            .await
+            .begin_removal(id, SessionMatch::Token(token));
+    }
+
+    #[tokio::test]
+    async fn simultaneous_holds_emit_one_matching_transition_per_key() {
+        let id = "test-simultaneous-holds";
+        let token = Arc::new(CancellationToken::new());
+        let mut session = ButtonSession::new();
+        let mut sink = FakeKeyEventSink::default();
+        register(id, &token, 1).await;
+
+        for (input, state) in [(1, 1), (2, 1), (2, 1), (1, 0), (2, 0), (2, 0)] {
+            assert_eq!(
+                send_report(id, &token, &mut session, &mut sink, input, state)
+                    .await
+                    .unwrap(),
+                ReportStatus::Current
+            );
+        }
+
+        assert_eq!(
+            sink.events,
+            vec![
+                (id.to_owned(), ButtonEvent::Down(0)),
+                (id.to_owned(), ButtonEvent::Down(1)),
+                (id.to_owned(), ButtonEvent::Up(0)),
+                (id.to_owned(), ButtonEvent::Up(1)),
+            ]
+        );
+        cleanup(id, &token).await;
+    }
+
+    #[tokio::test]
+    async fn input_zero_and_heartbeat_preserve_held_buttons() {
+        let id = "test-heartbeat";
+        let token = Arc::new(CancellationToken::new());
+        let mut session = ButtonSession::new();
+        let mut sink = FakeKeyEventSink::default();
+        register(id, &token, 1).await;
+
+        send_report(id, &token, &mut session, &mut sink, 1, 1)
+            .await
+            .unwrap();
+        send_report(id, &token, &mut session, &mut sink, 0, 0)
+            .await
+            .unwrap();
+        process_session_report(id, &token, &mut session, &[0; 11], &mut sink)
+            .await
+            .unwrap();
+        send_report(id, &token, &mut session, &mut sink, 1, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            sink.events,
+            vec![
+                (id.to_owned(), ButtonEvent::Down(0)),
+                (id.to_owned(), ButtonEvent::Up(0)),
+            ]
+        );
+        cleanup(id, &token).await;
+    }
+
+    #[tokio::test]
+    async fn invalid_button_ids_are_nonfatal_and_emit_no_input() {
+        let id = "test-invalid-input";
+        let token = Arc::new(CancellationToken::new());
+        let mut session = ButtonSession::new();
+        let mut sink = FakeKeyEventSink::default();
+        register(id, &token, 1).await;
+
+        send_report(id, &token, &mut session, &mut sink, 1, 1)
+            .await
+            .unwrap();
+        assert!(matches!(
+            send_report(id, &token, &mut session, &mut sink, 16, 1).await,
+            Err(MirajazzError::BadData)
+        ));
+        send_report(id, &token, &mut session, &mut sink, 1, 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            sink.events,
+            vec![
+                (id.to_owned(), ButtonEvent::Down(0)),
+                (id.to_owned(), ButtonEvent::Up(0)),
+            ]
+        );
+        cleanup(id, &token).await;
+    }
+
+    #[tokio::test]
+    async fn lcd_and_bottom_buttons_keep_their_opendeck_positions() {
+        let id = "test-button-mapping";
+        let token = Arc::new(CancellationToken::new());
+        let mut session = ButtonSession::new();
+        let mut sink = FakeKeyEventSink::default();
+        register(id, &token, 1).await;
+
+        for input in 1..=15 {
+            send_report(id, &token, &mut session, &mut sink, input, 1)
+                .await
+                .unwrap();
+        }
+        for input in [BTN_LEFT, BTN_MIDDLE, BTN_RIGHT] {
+            send_report(id, &token, &mut session, &mut sink, input, 1)
+                .await
+                .unwrap();
+        }
+
+        let positions = sink
+            .events
+            .iter()
+            .map(|(_, event)| match event {
+                ButtonEvent::Down(position) => *position,
+                ButtonEvent::Up(_) => unreachable!(),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(positions, (0..=17).collect::<Vec<_>>());
+        cleanup(id, &token).await;
+    }
+
+    #[tokio::test]
+    async fn replacement_session_starts_with_clean_button_state() {
+        let id = "test-reconnect";
+        let old_token = Arc::new(CancellationToken::new());
+        let mut old_session = ButtonSession::new();
+        let mut sink = FakeKeyEventSink::default();
+        register(id, &old_token, 1).await;
+        send_report(id, &old_token, &mut old_session, &mut sink, 1, 1)
+            .await
+            .unwrap();
+
+        old_token.cancel();
+        let new_token = Arc::new(CancellationToken::new());
+        let mut new_session = ButtonSession::new();
+        register(id, &new_token, 2).await;
+        send_report(id, &new_token, &mut new_session, &mut sink, 1, 0)
+            .await
+            .unwrap();
+        send_report(id, &new_token, &mut new_session, &mut sink, 1, 1)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            sink.events,
+            vec![
+                (id.to_owned(), ButtonEvent::Down(0)),
+                (id.to_owned(), ButtonEvent::Down(0)),
+            ]
+        );
+        cleanup(id, &new_token).await;
+    }
+
+    #[tokio::test]
+    async fn connected_devices_maintain_independent_button_states() {
+        let first_id = "test-device-one";
+        let second_id = "test-device-two";
+        let first_token = Arc::new(CancellationToken::new());
+        let second_token = Arc::new(CancellationToken::new());
+        let mut first_session = ButtonSession::new();
+        let mut second_session = ButtonSession::new();
+        let mut sink = FakeKeyEventSink::default();
+        register(first_id, &first_token, 1).await;
+        register(second_id, &second_token, 2).await;
+
+        send_report(first_id, &first_token, &mut first_session, &mut sink, 1, 1)
+            .await
+            .unwrap();
+        send_report(
+            second_id,
+            &second_token,
+            &mut second_session,
+            &mut sink,
+            1,
+            0,
+        )
+        .await
+        .unwrap();
+        send_report(
+            second_id,
+            &second_token,
+            &mut second_session,
+            &mut sink,
+            2,
+            1,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            sink.events,
+            vec![
+                (first_id.to_owned(), ButtonEvent::Down(0)),
+                (second_id.to_owned(), ButtonEvent::Down(1)),
+            ]
+        );
+        cleanup(first_id, &first_token).await;
+        cleanup(second_id, &second_token).await;
+    }
+
+    #[tokio::test]
+    async fn stale_reader_cannot_emit_into_replacement_generation() {
+        let id = "test-stale-generation";
+        let old_token = Arc::new(CancellationToken::new());
+        let new_token = Arc::new(CancellationToken::new());
+        let mut old_session = ButtonSession::new();
+        let mut new_session = ButtonSession::new();
+        let mut sink = FakeKeyEventSink::default();
+        register(id, &old_token, 1).await;
+        register(id, &new_token, 2).await;
+
+        assert_eq!(
+            send_report(id, &old_token, &mut old_session, &mut sink, 1, 1)
+                .await
+                .unwrap(),
+            ReportStatus::Stale
+        );
+        send_report(id, &new_token, &mut new_session, &mut sink, 2, 1)
+            .await
+            .unwrap();
+
+        assert_eq!(sink.events, vec![(id.to_owned(), ButtonEvent::Down(1))]);
+        cleanup(id, &new_token).await;
+    }
+
+    #[tokio::test]
+    async fn disconnect_drains_input_without_locking_other_device_lifecycles() {
+        let id = "test-input-drain";
+        let sessions = Arc::new(RwLock::new(
+            SessionRegistry::<&'static str, Arc<RwLock<()>>>::default(),
+        ));
+        let token = sessions.write().await.reserve(id.to_owned(), 1).unwrap();
+        let input_gate = Arc::new(RwLock::new(()));
+        assert_eq!(
+            publish_with(
+                &sessions,
+                id,
+                "device handle",
+                input_gate.clone(),
+                &token,
+                || async { Ok(()) },
+                |_| async { Ok(()) },
+            )
+            .await,
+            PublicationOutcome::Published
+        );
+
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let gate_for_input = input_gate.clone();
+        let entered_for_input = entered.clone();
+        let release_for_input = release.clone();
+        let input_task = tokio::spawn(async move {
+            let _guard = gate_for_input.read().await;
+            entered_for_input.notify_one();
+            release_for_input.notified().await;
+        });
+        entered.notified().await;
+
+        let sessions_for_disconnect = sessions.clone();
+        let disconnect_token = token.clone();
+        let disconnect_task = tokio::spawn(async move {
+            disconnect_matching_with(
+                &sessions_for_disconnect,
+                id,
+                SessionMatch::Token(&disconnect_token),
+                |gate| Some(gate.clone()),
+                |_| async { Ok(()) },
+            )
+            .await
+        });
+        token.cancelled().await;
+
+        timeout(Duration::from_secs(1), async {
+            drop(sessions.write().await);
+        })
+        .await
+        .expect("another device lifecycle should not wait for input delivery");
+
+        release.notify_one();
+        input_task.await.unwrap();
+        assert!(disconnect_task.await.unwrap());
+
+        assert!(sessions.write().await.reserve(id.to_owned(), 2).is_some());
     }
 }
