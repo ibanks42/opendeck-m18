@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Set LED Colors</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --canvas: #17191d;
+      --panel: #22252b;
+      --panel-edge: #3a3e47;
+      --text: #f1f2f4;
+      --muted: #979da8;
+      --focus: #8eb3ff;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      padding: 16px;
+      background: var(--canvas);
+      color: var(--text);
+      font: 13px/1.4 "Avenir Next", "Segoe UI", sans-serif;
+    }
+
+    header {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 14px;
+      font-weight: 650;
+      letter-spacing: 0.02em;
+    }
+
+    .count {
+      color: var(--muted);
+      font: 10px/1.2 ui-monospace, "SFMono-Regular", Consolas, monospace;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .device-map {
+      position: relative;
+      max-width: 326px;
+      margin: 0 auto;
+      padding: 9px;
+      border: 1px solid var(--panel-edge);
+      border-radius: 22px;
+      background: var(--panel);
+      box-shadow: inset 0 1px rgba(255, 255, 255, 0.04), 0 10px 28px rgba(0, 0, 0, 0.22);
+    }
+
+    .key-field {
+      position: absolute;
+      inset: 53px 48px 50px;
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      grid-template-rows: repeat(3, 1fr);
+      gap: 5px;
+      padding: 10px;
+      border: 1px solid #343842;
+      border-radius: 12px;
+      background: #1b1d22;
+    }
+
+    .key-field span {
+      border-radius: 3px;
+      background: #292c33;
+      box-shadow: inset 0 0 0 1px #30343c;
+    }
+
+    .led-grid {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      grid-template-columns: repeat(7, minmax(30px, 1fr));
+      grid-template-rows: repeat(6, 42px);
+      gap: 3px;
+    }
+
+    .led {
+      display: grid;
+      place-items: center;
+      gap: 1px;
+    }
+
+    .led span {
+      color: #b9bec7;
+      font: 9px/1 ui-monospace, "SFMono-Regular", Consolas, monospace;
+    }
+
+    input[type="color"] {
+      width: 30px;
+      height: 26px;
+      padding: 2px;
+      border: 1px solid #515762;
+      border-radius: 7px;
+      background: #111318;
+      cursor: pointer;
+    }
+
+    input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; }
+    input[type="color"]::-webkit-color-swatch { border: 0; border-radius: 4px; }
+    input[type="color"]::-moz-color-swatch { border: 0; border-radius: 4px; }
+
+    input:focus-visible,
+    button:focus-visible {
+      outline: 2px solid var(--focus);
+      outline-offset: 2px;
+    }
+
+    .controls {
+      max-width: 326px;
+      margin: 14px auto 0;
+      border-top: 1px solid #30343b;
+      padding-top: 14px;
+    }
+
+    .control-label {
+      display: block;
+      margin-bottom: 7px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .apply-row {
+      display: grid;
+      grid-template-columns: 48px 1fr;
+      gap: 8px;
+    }
+
+    .apply-row input[type="color"] { width: 48px; height: 34px; }
+
+    button {
+      border: 1px solid #555b66;
+      border-radius: 7px;
+      background: #30343b;
+      color: var(--text);
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    button:hover { background: #393e47; }
+
+    @media (max-width: 290px) {
+      body { padding: 12px 8px; }
+      .led-grid { grid-template-columns: repeat(7, minmax(26px, 1fr)); }
+      .key-field { inset-inline: 42px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>LED palette</h1>
+  </header>
+
+  <main>
+    <section class="device-map" aria-label="M18 physical LED layout">
+      <div class="key-field" aria-hidden="true">
+        <span></span><span></span><span></span><span></span><span></span>
+        <span></span><span></span><span></span><span></span><span></span>
+        <span></span><span></span><span></span><span></span><span></span>
+      </div>
+      <div class="led-grid" id="ledGrid"></div>
+    </section>
+
+    <section class="controls">
+      <label class="control-label" for="applyAllColor">Apply one color</label>
+      <div class="apply-row">
+        <input type="color" id="applyAllColor" value="#780000" aria-label="Color for all LEDs">
+        <button type="button" id="applyAll">Apply to all 24 LEDs</button>
+      </div>
+
+    </section>
+  </main>
+
+  <script>
+    const LED_COUNT = 24;
+    const DEFAULT_COLOR = '#780000';
+    const LED_LAYOUT = [
+      [21, 1, 1], [20, 1, 2], [19, 1, 3], [18, 1, 4], [17, 1, 5], [16, 1, 6], [15, 1, 7],
+      [22, 2, 1], [14, 2, 7], [1, 3, 1], [13, 3, 7], [2, 4, 1], [12, 4, 7],
+      [3, 5, 1], [23, 5, 3], [24, 5, 5], [11, 5, 7],
+      [4, 6, 1], [5, 6, 2], [6, 6, 3], [7, 6, 4], [8, 6, 5], [9, 6, 6], [10, 6, 7]
+    ];
+    const COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/;
+
+    let websocket;
+    let context;
+    let shouldPersistInitialSettings = false;
+
+    const ledGrid = document.getElementById('ledGrid');
+
+    for (const [number, row, column] of LED_LAYOUT) {
+      const label = document.createElement('label');
+      label.className = 'led';
+      label.style.gridArea = `${row} / ${column}`;
+      label.innerHTML = `<span>${number}</span><input type="color" id="led${number - 1}" value="${DEFAULT_COLOR}" aria-label="LED ${number}">`;
+      ledGrid.appendChild(label);
+    }
+
+    function isPalette(colors) {
+      return Array.isArray(colors)
+        && colors.length === LED_COUNT
+        && colors.every(color => typeof color === 'string' && COLOR_PATTERN.test(color));
+    }
+
+    function colors() {
+      return Array.from({ length: LED_COUNT }, (_, index) => document.getElementById(`led${index}`).value);
+    }
+
+    function displaySettings(settings) {
+      if (isPalette(settings.ledColors)) {
+        settings.ledColors.forEach((color, index) => {
+          document.getElementById(`led${index}`).value = color;
+        });
+      }
+    }
+
+    function saveSettings() {
+      if (!websocket || websocket.readyState !== WebSocket.OPEN) return;
+
+      websocket.send(JSON.stringify({
+        event: 'setSettings',
+        context,
+        payload: {
+          ledColors: colors(),
+        }
+      }));
+    }
+
+    function connectElgatoStreamDeckSocket(inPort, inUUID, inRegisterEvent, inInfo, inActionInfo) {
+      context = inUUID;
+
+      try {
+        const actionInfo = JSON.parse(inActionInfo);
+        const settings = actionInfo?.payload?.settings ?? {};
+        shouldPersistInitialSettings = settings.ledColors === undefined;
+        displaySettings(settings);
+      } catch (error) {
+        shouldPersistInitialSettings = true;
+        console.error('Unable to read action settings', error);
+      }
+
+      websocket = new WebSocket(`ws://localhost:${inPort}`);
+      websocket.addEventListener('open', () => {
+        websocket.send(JSON.stringify({ event: inRegisterEvent, uuid: context }));
+        if (shouldPersistInitialSettings) saveSettings();
+      });
+      websocket.addEventListener('message', event => {
+        const message = JSON.parse(event.data);
+        if (message.event === 'didReceiveSettings' && message.payload?.settings) {
+          displaySettings(message.payload.settings);
+        }
+      });
+    }
+
+    ledGrid.addEventListener('change', event => {
+      if (event.target.matches('input[type="color"]')) saveSettings();
+    });
+    document.getElementById('applyAll').addEventListener('click', () => {
+      const color = document.getElementById('applyAllColor').value;
+      for (let index = 0; index < LED_COUNT; index += 1) {
+        document.getElementById(`led${index}`).value = color;
+      }
+      saveSettings();
+    });
+  </script>
+</body>
+</html>

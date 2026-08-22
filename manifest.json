@@ -8,12 +8,26 @@
   "CodePathMac": "opendeck-m18-mac",
   "CodePathWin": "opendeck-m18-win.exe",
   "Icon": "assets/icon",
-  "Category": "Hardware",
+  "Category": "M18",
   "OS": [
     { "Platform": "linux" },
     { "Platform": "mac", "MinimumVersion": "11.3" },
     { "Platform": "windows", "MinimumVersion": "10" }
   ],
-  "Actions": [],
+  "Actions": [
+    {
+      "Name": "Set LED Colors",
+      "UUID": "com.github.ibanks42.opendeck-m18.set-led-colors",
+      "Icon": "assets/led-colors",
+      "PropertyInspectorPath": "property_inspector/set_led_colors.html",
+      "Controllers": ["Keypad"],
+      "States": [
+        {
+          "Image": "assets/led-colors",
+          "Name": "Set LED Colors"
+        }
+      ]
+    }
+  ],
   "DeviceNamespace": "18"
 }

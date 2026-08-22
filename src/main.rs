@@ -1,6 +1,9 @@
 use device::{DeviceCommand, DeviceOutput, command_for_set_image};
 use mirajazz::device::Device;
 use openaction::*;
+use palette::{
+    ACTION_UUID, DEFAULT_PALETTE, action_settings, palette_from_settings, settings_need_default,
+};
 use std::{
     collections::HashMap,
     process::exit,
@@ -16,6 +19,7 @@ use tokio::signal::unix::{SignalKind, signal};
 mod device;
 mod inputs;
 mod mappings;
+mod palette;
 mod watcher;
 
 pub static DEVICES: LazyLock<RwLock<HashMap<String, Arc<Device>>>> =
@@ -30,6 +34,19 @@ pub static TOKENS: LazyLock<RwLock<HashMap<String, TaskRegistration>>> =
 pub static OUTPUTS: LazyLock<RwLock<HashMap<String, Arc<DeviceOutput>>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 pub static TRACKER: LazyLock<Mutex<TaskTracker>> = LazyLock::new(|| Mutex::new(TaskTracker::new()));
+
+async fn send_device_command(device_id: &str, command: DeviceCommand) {
+    let output = OUTPUTS.read().await.get(device_id).cloned();
+
+    if let Some(output) = output {
+        if output.send(command).await.is_err() {
+            log::error!("Output worker for device {} is unavailable", output.id);
+            output.token.cancel();
+        }
+    } else {
+        log::error!("Received event for unknown device: {}", device_id);
+    }
+}
 
 struct GlobalEventHandler {}
 impl openaction::GlobalEventHandler for GlobalEventHandler {
@@ -115,7 +132,43 @@ impl openaction::GlobalEventHandler for GlobalEventHandler {
 }
 
 struct ActionEventHandler {}
-impl openaction::ActionEventHandler for ActionEventHandler {}
+impl openaction::ActionEventHandler for ActionEventHandler {
+    async fn key_down(
+        &self,
+        event: KeyEvent,
+        _outbound: &mut OutboundEventManager,
+    ) -> EventHandlerResult {
+        if event.action != ACTION_UUID {
+            return Ok(());
+        }
+
+        let Some(palette) = palette_from_settings(&event.payload.settings) else {
+            log::warn!(
+                "Ignoring malformed LED palette for action {}",
+                event.context
+            );
+            return Ok(());
+        };
+
+        send_device_command(&event.device, DeviceCommand::SetLedColors(palette)).await;
+
+        Ok(())
+    }
+
+    async fn will_appear(
+        &self,
+        event: AppearEvent,
+        outbound: &mut OutboundEventManager,
+    ) -> EventHandlerResult {
+        if event.action == ACTION_UUID && settings_need_default(&event.payload.settings) {
+            outbound
+                .set_settings(event.context, action_settings(&DEFAULT_PALETTE))
+                .await?;
+        }
+
+        Ok(())
+    }
+}
 
 async fn shutdown() {
     let tokens = TOKENS.write().await;

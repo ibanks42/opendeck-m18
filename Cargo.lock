@@ -528,6 +528,7 @@ dependencies = [
  "log",
  "mirajazz",
  "openaction",
+ "serde_json",
  "simplelog",
  "tokio",
  "tokio-util",

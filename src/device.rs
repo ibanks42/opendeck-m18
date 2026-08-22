@@ -17,6 +17,7 @@ use crate::{
         COL_COUNT, CandidateDevice, ENCODER_COUNT, KEY_COUNT, Kind, ROW_COUNT,
         get_image_format_for_key,
     },
+    palette::LedPalette,
 };
 
 pub enum DeviceCommand {
@@ -24,6 +25,7 @@ pub enum DeviceCommand {
     ClearImage(u8),
     ClearAll,
     SetBrightness(u8),
+    SetLedColors(LedPalette),
 }
 
 pub struct DeviceOutput {
@@ -349,13 +351,63 @@ enum OutputStep {
     Stop,
 }
 
+trait OutputDevice: Send + Sync {
+    async fn set_button_image(
+        &self,
+        key: u8,
+        format: mirajazz::types::ImageFormat,
+        image: DynamicImage,
+    ) -> Result<(), MirajazzError>;
+    async fn clear_button_image(&self, key: u8) -> Result<(), MirajazzError>;
+    async fn clear_all_button_images(&self) -> Result<(), MirajazzError>;
+    async fn set_brightness(&self, brightness: u8) -> Result<(), MirajazzError>;
+    async fn set_led_colors(&self, colors: &[[u8; 3]]) -> Result<(), MirajazzError>;
+    async fn flush(&self) -> Result<(), MirajazzError>;
+    async fn keep_alive(&self) -> Result<(), MirajazzError>;
+}
+
+impl OutputDevice for Device {
+    async fn set_button_image(
+        &self,
+        key: u8,
+        format: mirajazz::types::ImageFormat,
+        image: DynamicImage,
+    ) -> Result<(), MirajazzError> {
+        Device::set_button_image(self, key, format, image).await
+    }
+
+    async fn clear_button_image(&self, key: u8) -> Result<(), MirajazzError> {
+        Device::clear_button_image(self, key).await
+    }
+
+    async fn clear_all_button_images(&self) -> Result<(), MirajazzError> {
+        Device::clear_all_button_images(self).await
+    }
+
+    async fn set_brightness(&self, brightness: u8) -> Result<(), MirajazzError> {
+        Device::set_brightness(self, brightness).await
+    }
+
+    async fn set_led_colors(&self, colors: &[[u8; 3]]) -> Result<(), MirajazzError> {
+        Device::set_led_colors(self, colors).await
+    }
+
+    async fn flush(&self) -> Result<(), MirajazzError> {
+        Device::flush(self).await
+    }
+
+    async fn keep_alive(&self) -> Result<(), MirajazzError> {
+        Device::keep_alive(self).await
+    }
+}
+
 /// Owns all active-session HID writes for one device. The select only chooses
 /// the next action; each HID future is awaited afterward, where cancellation
 /// cannot drop it halfway through an overlapped Windows write.
-async fn device_output_task(
+async fn device_output_task<D: OutputDevice + 'static>(
     id: String,
     kind: Kind,
-    device: Arc<Device>,
+    device: Arc<D>,
     mut receiver: mpsc::Receiver<DeviceCommand>,
     token: Arc<CancellationToken>,
 ) -> Result<(), MirajazzError> {
@@ -401,6 +453,10 @@ async fn device_output_task(
             }
             OutputAction::Command(Some(DeviceCommand::SetBrightness(brightness))) => device
                 .set_brightness(brightness)
+                .await
+                .map(|_| OutputStep::Continue),
+            OutputAction::Command(Some(DeviceCommand::SetLedColors(colors))) => device
+                .set_led_colors(&colors)
                 .await
                 .map(|_| OutputStep::Continue),
             OutputAction::Command(None) | OutputAction::Cancel => Ok(OutputStep::Stop),
@@ -451,5 +507,139 @@ pub fn command_for_set_image(evt: SetImageEvent) -> Result<Option<DeviceCommand>
         (Some(position), None) => Ok(Some(DeviceCommand::ClearImage(position))),
         (None, None) => Ok(Some(DeviceCommand::ClearAll)),
         _ => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex as StdMutex;
+
+    use super::*;
+    use tokio::sync::Notify;
+
+    #[derive(Default)]
+    struct RecordingDevice {
+        operations: StdMutex<Vec<&'static str>>,
+        changed: Notify,
+    }
+
+    impl RecordingDevice {
+        async fn operation(&self, start: &'static str, end: &'static str) {
+            self.operations.lock().unwrap().push(start);
+            self.changed.notify_waiters();
+            tokio::task::yield_now().await;
+            self.operations.lock().unwrap().push(end);
+            self.changed.notify_waiters();
+        }
+
+        async fn wait_for(&self, operation: &str) {
+            loop {
+                let changed = self.changed.notified();
+                if self.operations.lock().unwrap().contains(&operation) {
+                    return;
+                }
+                changed.await;
+            }
+        }
+    }
+
+    impl OutputDevice for RecordingDevice {
+        async fn set_button_image(
+            &self,
+            _key: u8,
+            _format: mirajazz::types::ImageFormat,
+            _image: DynamicImage,
+        ) -> Result<(), MirajazzError> {
+            self.operation("image:start", "image:end").await;
+            Ok(())
+        }
+
+        async fn clear_button_image(&self, _key: u8) -> Result<(), MirajazzError> {
+            self.operation("clear:start", "clear:end").await;
+            Ok(())
+        }
+
+        async fn clear_all_button_images(&self) -> Result<(), MirajazzError> {
+            self.operation("clear-all:start", "clear-all:end").await;
+            Ok(())
+        }
+
+        async fn set_brightness(&self, _brightness: u8) -> Result<(), MirajazzError> {
+            self.operation("brightness:start", "brightness:end").await;
+            Ok(())
+        }
+
+        async fn set_led_colors(&self, _colors: &[[u8; 3]]) -> Result<(), MirajazzError> {
+            self.operation("led:start", "led:end").await;
+            Ok(())
+        }
+
+        async fn flush(&self) -> Result<(), MirajazzError> {
+            self.operation("flush:start", "flush:end").await;
+            Ok(())
+        }
+
+        async fn keep_alive(&self) -> Result<(), MirajazzError> {
+            self.operation("keepalive:start", "keepalive:end").await;
+            Ok(())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn led_and_existing_output_operations_do_not_interleave() {
+        let device = Arc::new(RecordingDevice::default());
+        let (sender, receiver) = mpsc::channel(8);
+        let token = Arc::new(CancellationToken::new());
+        let worker = tokio::spawn(device_output_task(
+            "test-device".to_owned(),
+            Kind::MiraboxM18,
+            device.clone(),
+            receiver,
+            token.clone(),
+        ));
+
+        sender
+            .send(DeviceCommand::SetImage {
+                position: 0,
+                image: DynamicImage::new_rgb8(1, 1),
+            })
+            .await
+            .unwrap();
+        sender.send(DeviceCommand::ClearImage(1)).await.unwrap();
+        sender
+            .send(DeviceCommand::SetLedColors([[1, 2, 3]; 24]))
+            .await
+            .unwrap();
+        sender.send(DeviceCommand::SetBrightness(75)).await.unwrap();
+        sender.send(DeviceCommand::ClearAll).await.unwrap();
+        device.wait_for("flush:end").await;
+
+        tokio::time::advance(Duration::from_secs(10)).await;
+        device.wait_for("keepalive:end").await;
+
+        token.cancel();
+        drop(sender);
+
+        worker.await.unwrap().unwrap();
+
+        assert_eq!(
+            *device.operations.lock().unwrap(),
+            [
+                "image:start",
+                "image:end",
+                "clear:start",
+                "clear:end",
+                "led:start",
+                "led:end",
+                "brightness:start",
+                "brightness:end",
+                "clear-all:start",
+                "clear-all:end",
+                "flush:start",
+                "flush:end",
+                "keepalive:start",
+                "keepalive:end",
+            ]
+        );
     }
 }

@@ -27,9 +27,11 @@ pub const MIRABOX_M18_PID: u16 = 0x1009;
 pub const MIRABOX_M18EN_PID: u16 = 0x1012;
 
 // Map all queries to usage page 65440 and usage id 1
-pub const VSDINSIDE_M18_QUERY: DeviceQuery = DeviceQuery::new(65440, 1, VSDINSIDE_VID, VSDINSIDE_M18_PID);
+pub const VSDINSIDE_M18_QUERY: DeviceQuery =
+    DeviceQuery::new(65440, 1, VSDINSIDE_VID, VSDINSIDE_M18_PID);
 pub const MIRABOX_M18_QUERY: DeviceQuery = DeviceQuery::new(65440, 1, MIRABOX_VID, MIRABOX_M18_PID);
-pub const MIRABOX_M18EN_QUERY: DeviceQuery = DeviceQuery::new(65440, 1, MIRABOX_VID, MIRABOX_M18EN_PID);
+pub const MIRABOX_M18EN_QUERY: DeviceQuery =
+    DeviceQuery::new(65440, 1, MIRABOX_VID, MIRABOX_M18EN_PID);
 
 pub const QUERIES: [DeviceQuery; 3] = [VSDINSIDE_M18_QUERY, MIRABOX_M18_QUERY, MIRABOX_M18EN_QUERY];
 

@@ -40,6 +40,7 @@ collect:
     rm -rf build
     mkdir -p build/{{id}}
     cp -r assets build/{{id}}
+    cp -r property_inspector build/{{id}}
     cp manifest.json build/{{id}}
     cp target/plugin-linux/x86_64-unknown-linux-gnu/release/opendeck-m18 build/{{id}}/opendeck-m18-linux
     cp target/plugin-mac/universal2-apple-darwin/release/opendeck-m18 build/{{id}}/opendeck-m18-mac
