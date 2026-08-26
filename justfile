@@ -2,7 +2,7 @@ id := "com.github.ibanks42.opendeck-m18.sdPlugin"
 
 release: bump package tag
 
-package: build-linux build-mac build-win collect zip
+package: build-linux build-linux-arm64 build-mac build-win collect zip
 
 bump next=`git cliff --bumped-version | tr -d "v"`:
     git diff --cached --exit-code
@@ -27,6 +27,9 @@ tag next=`git cliff --bumped-version`:
 build-linux:
     cargo build --release --target x86_64-unknown-linux-gnu --target-dir target/plugin-linux
 
+build-linux-arm64:
+    docker run --rm -v $(pwd):/io -w /io ghcr.io/rust-cross/cargo-zigbuild:sha-eba2d7e cargo zigbuild --release --target aarch64-unknown-linux-gnu --target-dir target/plugin-linux-arm64
+
 build-mac:
     docker run --rm -v $(pwd):/io -w /io ghcr.io/rust-cross/cargo-zigbuild:sha-eba2d7e cargo zigbuild --release --target universal2-apple-darwin --target-dir target/plugin-mac
 
@@ -43,6 +46,7 @@ collect:
     cp -r property_inspector build/{{id}}
     cp manifest.json build/{{id}}
     cp target/plugin-linux/x86_64-unknown-linux-gnu/release/opendeck-m18 build/{{id}}/opendeck-m18-linux
+    cp target/plugin-linux-arm64/aarch64-unknown-linux-gnu/release/opendeck-m18 build/{{id}}/opendeck-m18-linux-aarch64
     cp target/plugin-mac/universal2-apple-darwin/release/opendeck-m18 build/{{id}}/opendeck-m18-mac
     cp target/plugin-win/x86_64-pc-windows-gnu/release/opendeck-m18.exe build/{{id}}/opendeck-m18-win.exe
 

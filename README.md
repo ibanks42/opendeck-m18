@@ -8,7 +8,7 @@ An unofficial plugin for VSD Inside M18 / Mirabox M18 devices.
 
 ## OpenDeck version
 
-Requires OpenDeck 2.5.0 or newer
+Requires OpenDeck 2.6.1 or newer
 
 ## Supported devices
 
@@ -30,7 +30,7 @@ Add the **Set LED Colors** action to a keypad button to configure the M18's 24 R
 
 ## Platform support
 
-- Linux: Primary development platform
+- Linux (x86-64 and ARM64): Primary development platform
 - Mac: Best effort, may need testing
 - Windows: Not tested, contributions welcome
 

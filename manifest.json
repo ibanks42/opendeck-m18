@@ -4,9 +4,13 @@
   "Author": "ibanks42",
   "Version": "0.1.4",
   "PluginUUID": "com.github.ibanks42.opendeck-m18",
-  "CodePathLin": "opendeck-m18-linux",
-  "CodePathMac": "opendeck-m18-mac",
-  "CodePathWin": "opendeck-m18-win.exe",
+  "CodePaths": {
+    "x86_64-pc-windows-msvc": "opendeck-m18-win.exe",
+    "x86_64-apple-darwin": "opendeck-m18-mac",
+    "aarch64-apple-darwin": "opendeck-m18-mac",
+    "x86_64-unknown-linux-gnu": "opendeck-m18-linux",
+    "aarch64-unknown-linux-gnu": "opendeck-m18-linux-aarch64"
+  },
   "Icon": "assets/icon",
   "Category": "M18",
   "OS": [
