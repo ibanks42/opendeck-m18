@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.6] - 2026-09-09
+
+### 🐛 Bug Fixes
+
+- Reduce routine logging to debug level
+
+### ⚙️ Miscellaneous Tasks
+
+- Add build and release workflows
+- Use git-cliff for release notes generation
+- Use git-cliff to manage releases
+
 ## [0.1.4] - 2026-08-22
 
 ### Added
