@@ -209,7 +209,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let tracker = TRACKER.lock().await.clone();
 
-    log::info!("Waiting for tasks to finish");
+    log::debug!("Waiting for tasks to finish");
 
     tracker.close();
     tracker.wait().await;

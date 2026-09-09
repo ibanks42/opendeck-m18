@@ -52,7 +52,7 @@ fn device_info_to_candidate(dev: HidDeviceInfo) -> Option<CandidateDevice> {
 
 /// Returns devices that matches known pid/vid pairs
 async fn get_candidates() -> Result<Vec<CandidateDevice>, MirajazzError> {
-    log::info!("Looking for candidate devices");
+    log::debug!("Looking for candidate devices");
 
     let mut candidates: Vec<CandidateDevice> = Vec::new();
 
@@ -78,7 +78,7 @@ async fn spawn_candidate(tracker: &TaskTracker, candidate: CandidateDevice, gene
         token
     };
 
-    log::info!("Spawning device task for {:?}", candidate);
+    log::debug!("Spawning device task for {:?}", candidate);
     tracker.spawn(device_task(candidate, token));
 }
 
@@ -207,7 +207,7 @@ pub async fn watcher_task(token: Arc<CancellationToken>) -> Result<(), MirajazzE
     rescan.tick().await;
     let mut watcher_active = true;
 
-    log::info!("Watcher is ready");
+    log::debug!("Watcher is ready");
 
     loop {
         tokio::select! {
@@ -266,7 +266,7 @@ pub async fn watcher_task(token: Arc<CancellationToken>) -> Result<(), MirajazzE
                 }
             }
             _ = token.cancelled() => {
-                log::info!("Watcher is shutting down");
+                log::debug!("Watcher is shutting down");
 
                 break Ok(());
             }

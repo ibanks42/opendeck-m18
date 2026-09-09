@@ -47,7 +47,7 @@ impl DeviceOutput {
 
 /// Initializes a device and listens for events
 pub async fn device_task(candidate: CandidateDevice, token: Arc<CancellationToken>) {
-    log::info!("Running device task for {:?}", candidate);
+    log::debug!("Running device task for {:?}", candidate);
 
     let device = async {
         let device = connect(&candidate).await?;
@@ -136,7 +136,7 @@ pub async fn device_task(candidate: CandidateDevice, token: Arc<CancellationToke
 
     disconnect_session(&candidate.id, &token).await;
 
-    log::info!("Shutting down owned device {:?}", candidate);
+    log::debug!("Shutting down owned device {:?}", candidate);
     // This task always owns this exact handle. The output worker has fully
     // stopped, so shutdown cannot overlap with another write on it.
     device.shutdown().await.ok();
@@ -145,7 +145,7 @@ pub async fn device_task(candidate: CandidateDevice, token: Arc<CancellationToke
     // physical disconnect complete it normally; it owns no output path.
     drop(input_task);
 
-    log::info!("Device task finished for {:?}", candidate);
+    log::debug!("Device task finished for {:?}", candidate);
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -441,15 +441,15 @@ async fn device_events_task(
     token: Arc<CancellationToken>,
     mut session: ButtonSession,
 ) -> Result<(), MirajazzError> {
-    log::info!("Connecting to {} for incoming events", candidate.id);
+    log::debug!("Connecting to {} for incoming events", candidate.id);
     let reader = device.get_reader(|_, _| Ok(DeviceInput::NoData));
     let mut sink = OpenDeckKeyEventSink;
 
-    log::info!("Connected to {} for incoming events", candidate.id);
-    log::info!("Reader is ready for {}", candidate.id);
+    log::debug!("Connected to {} for incoming events", candidate.id);
+    log::debug!("Reader is ready for {}", candidate.id);
 
     loop {
-        log::info!("Reading updates...");
+        log::debug!("Reading updates...");
 
         let report = match reader.raw_read_data(512).await {
             Ok(report) => report,
@@ -523,7 +523,7 @@ async fn process_session_report<S: KeyEventSink>(
         return Ok(ReportStatus::Current);
     };
 
-    log::info!("New update: {:#?}", event);
+    log::debug!("New update: {:#?}", event);
     let result = sink.emit(id, event).await;
     drop(input_guard);
 
@@ -630,7 +630,7 @@ async fn device_output_task<D: OutputDevice + 'static>(
 
         let result = match action {
             OutputAction::Command(Some(DeviceCommand::SetImage { position, image })) => {
-                log::info!("Setting image for button {}", position);
+                log::debug!("Setting image for button {}", position);
                 device
                     .set_button_image(
                         opendeck_to_device(position),
@@ -664,7 +664,7 @@ async fn device_output_task<D: OutputDevice + 'static>(
                 device.flush().await.map(|_| OutputStep::ClearFlush)
             }
             OutputAction::KeepAlive => {
-                log::info!("Sending keepalive to {}", id);
+                log::debug!("Sending keepalive to {}", id);
                 device.keep_alive().await.map(|_| OutputStep::Continue)
             }
         };

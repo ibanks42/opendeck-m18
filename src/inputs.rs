@@ -41,7 +41,7 @@ impl ButtonSession {
         let input = *report.get(9).ok_or(MirajazzError::BadData)?;
         let state = *report.get(10).ok_or(MirajazzError::BadData)?;
 
-        log::info!("Processing input: key={}, state={}", input, state);
+        log::debug!("Processing input: key={}, state={}", input, state);
 
         if input == 0 {
             return Ok(None);
