@@ -37,7 +37,7 @@ jobs:
           fetch-depth: 0
       - uses: extractions/setup-just@v4
       - name: Install git-cliff
-        uses: taiki-e/install-action@v2.87.0
+        uses: taiki-e/install-action@v2.87.9
         with:
           tool: git-cliff@2.14.1
       - name: Bump version
