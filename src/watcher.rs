@@ -44,7 +44,7 @@ fn device_info_to_candidate(dev: HidDeviceInfo) -> Option<CandidateDevice> {
 
 /// Returns devices that matches known pid/vid pairs
 async fn get_candidates() -> Result<Vec<CandidateDevice>, MirajazzError> {
-    log::info!("Looking for candidate devices");
+    log::debug!("Looking for candidate devices");
 
     let mut candidates: Vec<CandidateDevice> = Vec::new();
 

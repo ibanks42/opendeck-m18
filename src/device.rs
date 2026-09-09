@@ -212,7 +212,7 @@ async fn keepalive_task(candidate: &CandidateDevice) -> Result<(), MirajazzError
 pub async fn handle_set_image(device: &Device, evt: SetImageEvent) -> Result<(), MirajazzError> {
     match (evt.position, evt.image) {
         (Some(position), Some(image)) => {
-            log::info!("Setting image for button {}", position);
+            log::debug!("Setting image for button {}", position);
 
             // OpenDeck sends image as a data url, so parse it using a library
             let url = DataUrl::process(image.as_str()).unwrap(); // Isn't expected to fail, so unwrap it is
