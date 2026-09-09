@@ -36,6 +36,10 @@ jobs:
         with:
           fetch-depth: 0
       - uses: extractions/setup-just@v4
+      - name: Install git-cliff
+        uses: taiki-e/install-action@v2.87.0
+        with:
+          tool: git-cliff@2.14.1
       - name: Bump version
         id: version
         env:
@@ -62,15 +66,14 @@ jobs:
           assert re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", current), "Expected a stable version"
           assert json.loads(manifest)["Version"] == current, "Manifest version mismatch"
           assert [p["version"] for p in tomllib.loads(lock)["package"] if p["name"] == package["name"]] == [current], "Lockfile version mismatch"
-          parts = list(map(int, current.split(".")))
-          index = {"major": 0, "minor": 1, "patch": 2}[os.environ["BUMP"]]
-          parts[index] += 1
-          parts[index + 1:] = [0] * (2 - index)
-          version = ".".join(map(str, parts))
-          previous, tag = "v" + current, "v" + version
+          previous = "v" + current
           git("merge-base", "--is-ancestor", previous, "HEAD")
-          assert not git("tag", "--list", tag), f"Tag {tag} already exists"
           assert git("rev-list", f"{previous}..HEAD"), "No new commits to release"
+          tag = git("cliff", "--config", "cliff.toml", "--topo-order", "--use-branch-tags", "--bump", os.environ["BUMP"], "--bumped-version")
+          assert re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", tag), "git-cliff returned an invalid version"
+          version = tag.removeprefix("v")
+          assert tuple(map(int, version.split("."))) > tuple(map(int, current.split("."))), "Version must increase"
+          assert not git("tag", "--list", tag), f"Tag {tag} already exists"
 
           def replace_version(text, pattern):
               result, count = re.subn(pattern, lambda m: m[1] + json.dumps(version), text, flags=re.M)
@@ -88,17 +91,14 @@ jobs:
               output.write(f"tag={tag}\nprevious={previous}\n")
           print(f"{previous} -> {tag}")
           '
-      - name: Generate release notes with git-cliff
-        uses: orhun/git-cliff-action@v4.8.0
-        with:
-          version: v2.14.1
-          config: cliff.toml
-          args: ${{ steps.version.outputs.previous }}..HEAD --tag ${{ steps.version.outputs.tag }} --strip all
+      - name: Generate release notes and update changelog
         env:
-          OUTPUT: ${{ runner.temp }}/release-notes.md
-      - name: Show release notes
+          PREVIOUS_TAG: ${{ steps.version.outputs.previous }}
+          TAG: ${{ steps.version.outputs.tag }}
         run: |
+          git cliff "$PREVIOUS_TAG..HEAD" --config cliff.toml --tag "$TAG" --strip all --output "$RUNNER_TEMP/release-notes.md"
           test -s "$RUNNER_TEMP/release-notes.md"
+          git cliff "$PREVIOUS_TAG..HEAD" --config cliff.toml --tag "$TAG" --prepend CHANGELOG.md
           cat "$RUNNER_TEMP/release-notes.md"
       - name: Build and package all platforms
         run: just package
@@ -110,7 +110,7 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add Cargo.toml Cargo.lock manifest.json
+          git add Cargo.toml Cargo.lock manifest.json CHANGELOG.md
           git commit -m "chore(release): $TAG"
           git tag "$TAG"
       - name: Push version and tag
