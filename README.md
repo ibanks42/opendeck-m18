@@ -39,7 +39,7 @@ Add the **Set LED Colors** action to a keypad button to configure the M18's 24 R
 1. Download an archive from [releases](https://github.com/ibanks42/opendeck-m18/releases)
 2. In OpenDeck: Plugins -> Install from file
 3. Linux: Download [udev rules](./40-opendeck-m18.rules) and install them by copying into `/etc/udev/rules.d/` and running `sudo udevadm control --reload-rules`
-4. Unplug and plug again the device, restart OpenDeck
+4. Unplug and the device and plug it back in, then restart OpenDeck
 
 ## Building
 
@@ -52,15 +52,23 @@ You'll need:
 - Docker
 - [just](https://just.systems)
 
-### Building a release package
+### Building locally
 
 ```sh
 $ just package
 ```
 
+## Releases
+
+Use the [Release workflow](.github/workflows/release.yml) on `main` to publish a release.
+Select a `patch`, `minor`, or `major` version bump.
+For a trial run without pushing or publishing, enable `dry-run`.
+
+The workflow updates versions, prepends release notes to `CHANGELOG.md`, builds the package, and creates the release commit and tag.
+
 ## Acknowledgments
 
-This plugin is a fork of [opendeck-akp153](https://github.com/4ndv/opendeck-akp153) by Andrey Viktorov.
+This plugin originated from [opendeck-akp153](https://github.com/4ndv/opendeck-akp153) by Andrey Viktorov.
 
 It is also heavily based on work by contributors of [elgato-streamdeck](https://github.com/streamduck-org/elgato-streamdeck) crate.
 

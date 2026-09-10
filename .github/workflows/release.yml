@@ -101,9 +101,10 @@ jobs:
           assert json.loads(manifest)["Version"] == current, "Manifest version mismatch"
           assert [p["version"] for p in tomllib.loads(lock)["package"] if p["name"] == package["name"]] == [current], "Lockfile version mismatch"
           previous = "v" + current
+          git("merge-base", "--is-ancestor", "v0.1.0", previous)
           git("merge-base", "--is-ancestor", previous, "HEAD")
           assert git("rev-list", f"{previous}..HEAD"), "No new commits to release"
-          tag = git("cliff", "--config", "cliff.toml", "--topo-order", "--use-branch-tags", "--bump", os.environ["BUMP"], "--bumped-version")
+          tag = git("cliff", "v0.1.0..HEAD", "--config", "cliff.toml", "--topo-order", "--use-branch-tags", "--bump", os.environ["BUMP"], "--bumped-version")
           assert re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", tag), "git-cliff returned an invalid version"
           version = tag.removeprefix("v")
           assert tuple(map(int, version.split("."))) > tuple(map(int, current.split("."))), "Version must increase"
