@@ -7,12 +7,15 @@
   <style>
     :root {
       color-scheme: dark;
-      --canvas: #17191d;
-      --panel: #22252b;
-      --panel-edge: #3a3e47;
-      --text: #f1f2f4;
-      --muted: #979da8;
-      --focus: #8eb3ff;
+      --bg: #16181c;
+      --shell: #262930;
+      --edge: #34383f;
+      --face: #121418;
+      --key: #1c1f24;
+      --text: #e8eaed;
+      --muted: #8b9099;
+      --focus: #7ea6f5;
+      --mono: ui-monospace, "SFMono-Regular", Consolas, monospace;
     }
 
     * { box-sizing: border-box; }
@@ -20,95 +23,93 @@
     body {
       margin: 0;
       padding: 16px;
-      background: var(--canvas);
+      background: var(--bg);
       color: var(--text);
-      font: 13px/1.4 "Avenir Next", "Segoe UI", sans-serif;
+      font: 12px/1.45 system-ui, "Segoe UI", sans-serif;
     }
 
     header {
       display: flex;
       align-items: baseline;
       justify-content: space-between;
-      margin-bottom: 12px;
+      gap: 10px;
+      max-width: 330px;
+      margin: 0 auto 12px;
     }
 
     h1 {
       margin: 0;
-      font-size: 14px;
-      font-weight: 650;
-      letter-spacing: 0.02em;
+      font-size: 13px;
+      font-weight: 600;
     }
 
-    .count {
+    #status {
       color: var(--muted);
-      font: 10px/1.2 ui-monospace, "SFMono-Regular", Consolas, monospace;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
+      font-size: 11px;
     }
 
-    .device-map {
-      position: relative;
-      max-width: 326px;
+    /* The map follows the M18: one light bar around the chassis edge, a 5x3 key
+       field, and three buttons flanked by the two inner light cutouts. */
+    .device {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      grid-template-rows: auto minmax(0, 1fr) auto;
+      max-width: 330px;
       margin: 0 auto;
-      padding: 9px;
-      border: 1px solid var(--panel-edge);
-      border-radius: 22px;
-      background: var(--panel);
-      box-shadow: inset 0 1px rgba(255, 255, 255, 0.04), 0 10px 28px rgba(0, 0, 0, 0.22);
+      padding: 7px;
+      border: 1px solid var(--edge);
+      border-radius: 14px;
+      background: var(--shell);
     }
 
-    .key-field {
-      position: absolute;
-      inset: 53px 48px 50px;
-      display: grid;
-      grid-template-columns: repeat(5, 1fr);
-      grid-template-rows: repeat(3, 1fr);
-      gap: 5px;
-      padding: 10px;
-      border: 1px solid #343842;
-      border-radius: 12px;
-      background: #1b1d22;
-    }
+    /* The horizontal runs span the full width so the bar closes at the corners. */
+    .bar-top { grid-area: 1 / 1 / 2 / 4; }
+    .bar-bottom { grid-area: 3 / 1 / 4 / 4; }
+    .bar-left { grid-area: 2 / 1 / 3 / 2; }
+    .bar-right { grid-area: 2 / 3 / 3 / 4; }
+    .face { grid-area: 2 / 2 / 3 / 3; }
 
-    .key-field span {
-      border-radius: 3px;
-      background: #292c33;
-      box-shadow: inset 0 0 0 1px #30343c;
-    }
+    .bar { display: grid; gap: 2px; }
+    .bar-top, .bar-bottom { grid-auto-flow: column; grid-auto-columns: 1fr; }
+    .bar-left, .bar-right { grid-auto-flow: row; grid-auto-rows: 1fr; }
 
-    .led-grid {
-      position: relative;
-      z-index: 1;
-      display: grid;
-      grid-template-columns: repeat(7, minmax(30px, 1fr));
-      grid-template-rows: repeat(6, 42px);
-      gap: 3px;
-    }
-
+    /* One segment per LED. */
     .led {
-      display: grid;
-      place-items: center;
-      gap: 1px;
-    }
-
-    .led span {
-      color: #b9bec7;
-      font: 9px/1 ui-monospace, "SFMono-Regular", Consolas, monospace;
+      --color: #780000;
+      position: relative;
+      display: flex;
     }
 
     input[type="color"] {
-      width: 30px;
-      height: 26px;
-      padding: 2px;
-      border: 1px solid #515762;
-      border-radius: 7px;
-      background: #111318;
+      padding: 0;
+      border: 0;
+      background: transparent;
       cursor: pointer;
     }
 
+    .led input[type="color"] {
+      border-radius: 2px;
+      box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.35);
+    }
+
+    .bar-top input[type="color"],
+    .bar-bottom input[type="color"] { width: 100%; height: 10px; }
+
+    .bar-left input[type="color"],
+    .bar-right input[type="color"] { width: 10px; height: 100%; min-height: 20px; }
+
+    .bar-top .led:first-child input { border-top-left-radius: 7px; }
+    .bar-top .led:last-child input { border-top-right-radius: 7px; }
+    .bar-bottom .led:first-child input { border-bottom-left-radius: 7px; }
+    .bar-bottom .led:last-child input { border-bottom-right-radius: 7px; }
+
+    .led input[type="color"]:hover:not(:disabled) {
+      box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(255, 255, 255, 0.5);
+    }
+
     input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; }
-    input[type="color"]::-webkit-color-swatch { border: 0; border-radius: 4px; }
-    input[type="color"]::-moz-color-swatch { border: 0; border-radius: 4px; }
+    input[type="color"]::-webkit-color-swatch { border: 0; border-radius: inherit; }
+    input[type="color"]::-moz-color-swatch { border: 0; border-radius: inherit; }
 
     input:focus-visible,
     button:focus-visible {
@@ -116,99 +117,188 @@
       outline-offset: 2px;
     }
 
-    .controls {
-      max-width: 326px;
-      margin: 14px auto 0;
-      border-top: 1px solid #30343b;
-      padding-top: 14px;
+    input:disabled,
+    button:disabled {
+      cursor: default;
+      opacity: 0.45;
     }
 
-    .control-label {
-      display: block;
-      margin-bottom: 7px;
-      color: var(--muted);
-      font-size: 11px;
-      font-weight: 600;
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
-    }
-
-    .apply-row {
+    .face {
       display: grid;
-      grid-template-columns: 48px 1fr;
+      gap: 8px;
+      margin: 7px;
+      padding: 8px;
+      border-radius: 8px;
+      background: var(--face);
+      box-shadow: inset 0 0 0 1px #22252b;
+    }
+
+    .keys {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 4px;
+    }
+
+    .keys span {
+      aspect-ratio: 1;
+      border-radius: 3px;
+      background: var(--key);
+    }
+
+    .button-row {
+      display: grid;
+      grid-template-columns: 1fr auto auto auto 1fr;
+      align-items: center;
+      justify-items: center;
       gap: 8px;
     }
 
-    .apply-row input[type="color"] { width: 48px; height: 34px; }
+    .button-row .led { justify-self: stretch; justify-content: center; }
 
-    button {
-      border: 1px solid #555b66;
-      border-radius: 7px;
-      background: #30343b;
-      color: var(--text);
-      font: inherit;
-      font-weight: 600;
+    .button-row .led input[type="color"] {
+      width: 100%;
+      max-width: 38px;
+      height: 5px;
+      border-radius: 3px;
+    }
+
+    .knob {
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      background: #24272d;
+    }
+
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      max-width: 330px;
+      margin: 18px auto 0;
+    }
+
+    .swatch {
+      position: relative;
+      width: 44px;
+      height: 30px;
+    }
+
+    .swatch input[type="color"] {
+      width: 100%;
+      height: 100%;
+      border-radius: 4px;
+      box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.35), 0 0 0 1px var(--edge);
+    }
+
+    /* The picker can only show one color, so when the LEDs differ the swatch is
+       covered with a struck-through plate instead of a misleading color. */
+    .swatch[data-mixed] .plate {
+      position: absolute;
+      inset: 0;
+      border-radius: 4px;
+      background:
+        linear-gradient(115deg, transparent calc(50% - 1px), var(--muted) calc(50% - 1px), var(--muted) calc(50% + 1px), transparent calc(50% + 1px)),
+        var(--key);
+      box-shadow: 0 0 0 1px var(--edge);
+      pointer-events: none;
+    }
+
+    .controls label {
       cursor: pointer;
     }
 
-    button:hover { background: #393e47; }
-
-    @media (max-width: 290px) {
+    @media (max-width: 300px) {
       body { padding: 12px 8px; }
-      .led-grid { grid-template-columns: repeat(7, minmax(26px, 1fr)); }
-      .key-field { inset-inline: 42px; }
+      .device { padding: 6px; }
+      .face { margin: 6px; }
     }
   </style>
 </head>
 <body>
   <header>
-    <h1>LED palette</h1>
+    <h1>LED colors</h1>
+    <span id="status">Connecting</span>
   </header>
 
   <main>
-    <section class="device-map" aria-label="M18 physical LED layout">
-      <div class="key-field" aria-hidden="true">
-        <span></span><span></span><span></span><span></span><span></span>
-        <span></span><span></span><span></span><span></span><span></span>
-        <span></span><span></span><span></span><span></span><span></span>
+    <section class="device" aria-label="M18 LED layout">
+      <div class="bar bar-top" id="barTop"></div>
+      <div class="bar bar-left" id="barLeft"></div>
+      <div class="bar bar-right" id="barRight"></div>
+      <div class="bar bar-bottom" id="barBottom"></div>
+
+      <div class="face">
+        <div class="keys" aria-hidden="true">
+          <span></span><span></span><span></span><span></span><span></span>
+          <span></span><span></span><span></span><span></span><span></span>
+          <span></span><span></span><span></span><span></span><span></span>
+        </div>
+        <div class="button-row" id="buttonRow">
+          <div class="knob" aria-hidden="true"></div>
+          <div class="knob" aria-hidden="true"></div>
+          <div class="knob" aria-hidden="true"></div>
+        </div>
       </div>
-      <div class="led-grid" id="ledGrid"></div>
     </section>
 
     <section class="controls">
-      <label class="control-label" for="applyAllColor">Apply one color</label>
-      <div class="apply-row">
-        <input type="color" id="applyAllColor" value="#780000" aria-label="Color for all LEDs">
-        <button type="button" id="applyAll">Apply to all 24 LEDs</button>
-      </div>
-
+      <span class="swatch" id="applyAllSwatch">
+        <input type="color" id="applyAllColor" value="#780000" aria-label="Set every LED to one color">
+        <span class="plate" aria-hidden="true"></span>
+      </span>
+      <label for="applyAllColor">Set every LED to one color</label>
     </section>
   </main>
 
   <script>
     const LED_COUNT = 24;
     const DEFAULT_COLOR = '#780000';
-    const LED_LAYOUT = [
-      [21, 1, 1], [20, 1, 2], [19, 1, 3], [18, 1, 4], [17, 1, 5], [16, 1, 6], [15, 1, 7],
-      [22, 2, 1], [14, 2, 7], [1, 3, 1], [13, 3, 7], [2, 4, 1], [12, 4, 7],
-      [3, 5, 1], [23, 5, 3], [24, 5, 5], [11, 5, 7],
-      [4, 6, 1], [5, 6, 2], [6, 6, 3], [7, 6, 4], [8, 6, 5], [9, 6, 6], [10, 6, 7]
-    ];
+    // LEDs 1-22 wrap the chassis; 23 and 24 are the cutouts beside the buttons.
+    const LED_BARS = {
+      barTop: [21, 20, 19, 18, 17, 16, 15],
+      barLeft: [22, 1, 2, 3],
+      barRight: [14, 13, 12, 11],
+      barBottom: [4, 5, 6, 7, 8, 9, 10],
+    };
+    const INNER_LEDS = [23, 24];
     const COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/;
 
     let websocket;
     let context;
-    let shouldPersistInitialSettings = false;
+    let actionSettings = {};
+    let settingsLoaded = false;
 
-    const ledGrid = document.getElementById('ledGrid');
+    const status = document.getElementById('status');
+    const buttonRow = document.getElementById('buttonRow');
+    const applyAllSwatch = document.getElementById('applyAllSwatch');
+    const applyAllColor = document.getElementById('applyAllColor');
 
-    for (const [number, row, column] of LED_LAYOUT) {
+    function ledSegment(number) {
       const label = document.createElement('label');
       label.className = 'led';
-      label.style.gridArea = `${row} / ${column}`;
-      label.innerHTML = `<span>${number}</span><input type="color" id="led${number - 1}" value="${DEFAULT_COLOR}" aria-label="LED ${number}">`;
-      ledGrid.appendChild(label);
+      label.innerHTML = `<input type="color" id="led${number - 1}" value="${DEFAULT_COLOR}" aria-label="LED ${number}">`;
+      return label;
     }
+
+    for (const [barId, numbers] of Object.entries(LED_BARS)) {
+      const bar = document.getElementById(barId);
+      for (const number of numbers) bar.appendChild(ledSegment(number));
+    }
+    // One cutout on each side of the three buttons.
+    buttonRow.prepend(ledSegment(INNER_LEDS[0]));
+    buttonRow.append(ledSegment(INNER_LEDS[1]));
+
+    function setLed(index, color) {
+      document.getElementById(`led${index}`).value = color;
+    }
+
+    function enableControls(enabled) {
+      document.querySelectorAll('input[type="color"]').forEach(control => {
+        control.disabled = !enabled;
+      });
+      status.textContent = enabled ? '' : 'Connecting';
+    }
+    enableControls(false);
 
     function isPalette(colors) {
       return Array.isArray(colors)
@@ -220,23 +310,32 @@
       return Array.from({ length: LED_COUNT }, (_, index) => document.getElementById(`led${index}`).value);
     }
 
+    // The all-LEDs picker tracks the palette when it is uniform; otherwise it
+    // shows the mixed plate, since one swatch cannot stand for 24 colors.
+    function refreshApplyAll() {
+      const palette = colors();
+      const uniform = palette.every(color => color === palette[0]);
+      applyAllSwatch.toggleAttribute('data-mixed', !uniform);
+      if (uniform) applyAllColor.value = palette[0];
+    }
+
     function displaySettings(settings) {
-      if (isPalette(settings.ledColors)) {
-        settings.ledColors.forEach((color, index) => {
-          document.getElementById(`led${index}`).value = color;
-        });
-      }
+      actionSettings = settings ?? {};
+      const palette = isPalette(actionSettings.ledColors)
+        ? actionSettings.ledColors.map(color => color.toLowerCase())
+        : Array(LED_COUNT).fill(DEFAULT_COLOR);
+      palette.forEach((color, index) => setLed(index, color));
+      refreshApplyAll();
     }
 
     function saveSettings() {
-      if (!websocket || websocket.readyState !== WebSocket.OPEN) return;
+      if (!settingsLoaded || !websocket || websocket.readyState !== WebSocket.OPEN) return;
 
+      actionSettings = { ...actionSettings, ledColors: colors() };
       websocket.send(JSON.stringify({
         event: 'setSettings',
         context,
-        payload: {
-          ledColors: colors(),
-        }
+        payload: actionSettings,
       }));
     }
 
@@ -246,34 +345,49 @@
       try {
         const actionInfo = JSON.parse(inActionInfo);
         const settings = actionInfo?.payload?.settings ?? {};
-        shouldPersistInitialSettings = settings.ledColors === undefined;
         displaySettings(settings);
       } catch (error) {
-        shouldPersistInitialSettings = true;
         console.error('Unable to read action settings', error);
       }
 
       websocket = new WebSocket(`ws://localhost:${inPort}`);
       websocket.addEventListener('open', () => {
         websocket.send(JSON.stringify({ event: inRegisterEvent, uuid: context }));
-        if (shouldPersistInitialSettings) saveSettings();
+        // Fetch the host's saved value; the editor's initial snapshot can be stale.
+        // Opening an inspector must never write defaults over an existing palette.
+        websocket.send(JSON.stringify({ event: 'getSettings', context }));
       });
       websocket.addEventListener('message', event => {
         const message = JSON.parse(event.data);
-        if (message.event === 'didReceiveSettings' && message.payload?.settings) {
+        if (message.event === 'didReceiveSettings' && message.context === context && message.payload) {
           displaySettings(message.payload.settings);
+          settingsLoaded = true;
+          enableControls(true);
         }
+      });
+      websocket.addEventListener('close', () => {
+        settingsLoaded = false;
+        enableControls(false);
       });
     }
 
-    ledGrid.addEventListener('change', event => {
-      if (event.target.matches('input[type="color"]')) saveSettings();
+    document.querySelector('.device').addEventListener('change', event => {
+      if (!event.target.matches('.led input[type="color"]')) return;
+      refreshApplyAll();
+      saveSettings();
     });
-    document.getElementById('applyAll').addEventListener('click', () => {
-      const color = document.getElementById('applyAllColor').value;
+
+    function applyToAll() {
       for (let index = 0; index < LED_COUNT; index += 1) {
-        document.getElementById(`led${index}`).value = color;
+        setLed(index, applyAllColor.value);
       }
+      applyAllSwatch.removeAttribute('data-mixed');
+    }
+
+    // Both here and on the individual LEDs, the color lands when the picker is
+    // committed; nothing is applied while the dialog is still open.
+    applyAllColor.addEventListener('change', () => {
+      applyToAll();
       saveSettings();
     });
   </script>
