@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.0] - 2026-09-10
+
+### 🚀 Features
+
+- Migrate plugin to openaction v2 and more
+- Redesign m18 led inspector
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump taiki-e/install-action to v2.87.9
+- Remove standalone build workflow
+- Build all plugin targets natively in release
+
 ## [0.1.6] - 2026-09-09
 
 ### 🐛 Bug Fixes
