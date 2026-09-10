@@ -36,10 +36,44 @@ jobs:
         with:
           fetch-depth: 0
       - uses: extractions/setup-just@v4
-      - name: Install git-cliff
+      - name: Install Rust targets
+        uses: dtolnay/rust-toolchain@1.93.0
+        with:
+          targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu,x86_64-apple-darwin,aarch64-apple-darwin,x86_64-pc-windows-gnu
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Cache Cargo dependencies and builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ubuntu24-zig0.16.0-sdk11.3-zigbuild0.23.4
+          cache-bin: false
+          workspaces: |
+            . -> target/plugin-linux
+            . -> target/plugin-linux-arm64
+            . -> target/plugin-mac
+            . -> target/plugin-win
+      - name: Install release tools
         uses: taiki-e/install-action@v2.87.9
         with:
-          tool: git-cliff@2.14.1
+          tool: git-cliff@2.14.1,cargo-zigbuild@0.23.4
+      - name: Install Windows cross-compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64
+      - name: Cache macOS SDK
+        id: macos-sdk
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/MacOSX11.3.sdk
+          key: macos-sdk-11.3-v1
+      - name: Download macOS SDK
+        if: steps.macos-sdk.outputs.cache-hit != 'true'
+        run: |
+          curl --fail --location --retry 3 https://github.com/phracker/MacOSX-SDKs/releases/download/11.3/MacOSX11.3.sdk.tar.xz \
+            --output "$RUNNER_TEMP/macos-sdk.tar.xz"
+          tar -xJf "$RUNNER_TEMP/macos-sdk.tar.xz" -C "$RUNNER_TEMP"
       - name: Bump version
         id: version
         env:
@@ -101,7 +135,9 @@ jobs:
           git cliff "$PREVIOUS_TAG..HEAD" --config cliff.toml --tag "$TAG" --prepend CHANGELOG.md
           cat "$RUNNER_TEMP/release-notes.md"
       - name: Build and package all platforms
-        run: just package
+        env:
+          SDKROOT: ${{ runner.temp }}/MacOSX11.3.sdk
+        run: just package-native
       - name: Check archive
         run: unzip -t build/opendeck-m18.plugin.zip
       - name: Commit version and create local tag

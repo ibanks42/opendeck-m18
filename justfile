@@ -4,7 +4,10 @@ windows_image := "rust@sha256:bf5a9aa29062a6cb03c49bd59a46eb55e3cc770caf598a221a
 
 release: bump package tag
 
-package: build-linux build-linux-arm64 build-mac build-win collect zip
+package: build-all collect zip
+
+# Requires Rust targets, cargo-zigbuild, Zig, MinGW, and SDKROOT to be installed.
+package-native: build-all-native collect zip
 
 bump next=`git cliff --bumped-version | tr -d "v"`:
     git diff --cached --exit-code
@@ -25,6 +28,22 @@ tag next=`git cliff --bumped-version`:
     git add .
     git commit -m "chore(release): {{next}}"
     git tag "{{next}}"
+
+build-all:
+    docker run --rm -v "$(pwd):/io" -w /io {{cross_image}} sh -ec '\
+        apt-get update; \
+        apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64; \
+        rustup target add x86_64-pc-windows-gnu; \
+        cargo zigbuild --release --locked --target x86_64-unknown-linux-gnu.2.39 --target-dir target/plugin-linux; \
+        cargo zigbuild --release --locked --target aarch64-unknown-linux-gnu --target-dir target/plugin-linux-arm64; \
+        cargo zigbuild --release --locked --target universal2-apple-darwin --target-dir target/plugin-mac; \
+        cargo build --release --locked --target x86_64-pc-windows-gnu --target-dir target/plugin-win'
+
+build-all-native:
+    cargo zigbuild --release --locked --target x86_64-unknown-linux-gnu.2.39 --target-dir target/plugin-linux
+    cargo zigbuild --release --locked --target aarch64-unknown-linux-gnu --target-dir target/plugin-linux-arm64
+    cargo zigbuild --release --locked --target universal2-apple-darwin --target-dir target/plugin-mac
+    cargo build --release --locked --target x86_64-pc-windows-gnu --target-dir target/plugin-win
 
 build-linux:
     cargo build --release --locked --target x86_64-unknown-linux-gnu --target-dir target/plugin-linux
