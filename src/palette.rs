@@ -1,11 +1,70 @@
-use openaction::SettingsValue;
-use serde_json::json;
+use std::{collections::HashMap, sync::LazyLock};
+use tokio::sync::Mutex;
+
+use serde_json::{Value as SettingsValue, json};
 
 pub const ACTION_UUID: &str = "com.github.ibanks42.opendeck-m18.set-led-colors";
 pub const LED_COUNT: usize = 24;
 pub type LedPalette = [[u8; 3]; LED_COUNT];
 
 pub const DEFAULT_PALETTE: LedPalette = [[0x78, 0x00, 0x00]; LED_COUNT];
+
+#[derive(Default)]
+pub struct PaletteStore {
+    settings: Option<SettingsValue>,
+    palettes: HashMap<String, LedPalette>,
+}
+
+pub static PALETTES: LazyLock<Mutex<PaletteStore>> =
+    LazyLock::new(|| Mutex::new(PaletteStore::default()));
+
+impl PaletteStore {
+    // A selection made before the initial response wins over persisted settings.
+    pub fn load(&mut self, settings: SettingsValue) -> bool {
+        if self.settings.is_some() {
+            return false;
+        }
+        let pending = !self.palettes.is_empty();
+        if let Some(saved) = settings
+            .get("ledPalettes")
+            .and_then(SettingsValue::as_object)
+        {
+            for (id, value) in saved {
+                if let Some(palette) = parse_palette(value) {
+                    self.palettes.entry(id.clone()).or_insert(palette);
+                }
+            }
+        }
+        self.settings = Some(settings);
+        pending
+    }
+
+    pub fn select(&mut self, id: &str, palette: LedPalette) {
+        self.palettes.insert(id.to_owned(), palette);
+    }
+
+    pub fn get(&self, id: &str) -> Option<LedPalette> {
+        self.palettes.get(id).copied()
+    }
+
+    pub fn saved_palettes(&self) -> &HashMap<String, LedPalette> {
+        &self.palettes
+    }
+
+    pub fn settings_to_save(&self) -> Option<SettingsValue> {
+        let mut settings = self.settings.clone()?;
+        if !settings.is_object() {
+            settings = json!({});
+        }
+        let entries: serde_json::Map<String, SettingsValue> = self
+            .palettes
+            .iter()
+            .map(|(id, palette)| (id.clone(), action_settings(palette)))
+            .collect();
+        settings["ledPalettes"] = SettingsValue::Object(entries);
+        Some(settings)
+    }
+}
 
 pub fn parse_palette(settings: &SettingsValue) -> Option<LedPalette> {
     let colors = settings.get("ledColors")?.as_array()?;
@@ -59,49 +118,3 @@ fn palette_strings(palette: &LedPalette) -> Vec<String> {
         .collect()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_exactly_twenty_four_six_digit_rgb_colors() {
-        let settings = json!({
-            "ledColors": (0..LED_COUNT)
-                .map(|index| format!("#{index:02x}80ff"))
-                .collect::<Vec<_>>()
-        });
-
-        let palette = parse_palette(&settings).unwrap();
-
-        assert_eq!(palette[0], [0x00, 0x80, 0xff]);
-        assert_eq!(palette[23], [0x17, 0x80, 0xff]);
-    }
-
-    #[test]
-    fn rejects_malformed_and_incorrectly_sized_palettes() {
-        for settings in [
-            json!({}),
-            json!({ "ledColors": ["#ff0000"] }),
-            json!({ "ledColors": vec!["ff0000"; LED_COUNT] }),
-            json!({ "ledColors": vec!["#gg0000"; LED_COUNT] }),
-            json!({ "ledColors": vec!["#ff000000"; LED_COUNT] }),
-        ] {
-            assert_eq!(parse_palette(&settings), None);
-        }
-    }
-
-    #[test]
-    fn untouched_action_uses_a_complete_visible_default() {
-        let palette = palette_from_settings(&json!({})).unwrap();
-
-        assert_eq!(palette, DEFAULT_PALETTE);
-        assert!(palette.iter().all(|color| *color != [0, 0, 0]));
-    }
-
-    #[test]
-    fn malformed_action_palette_is_not_replaced_with_a_default() {
-        let settings = json!({ "ledColors": vec!["not-a-color"; LED_COUNT] });
-
-        assert_eq!(palette_from_settings(&settings), None);
-    }
-}

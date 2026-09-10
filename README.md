@@ -48,7 +48,7 @@ Add the **Set LED Colors** action to a keypad button to configure the M18's 24 R
 You'll need:
 
 - A Linux OS of some sort
-- Rust 1.87 and up with `x86_64-unknown-linux-gnu` and `x86_64-pc-windows-gnu` targets installed
+- Rust 1.88 or newer with the `x86_64-unknown-linux-gnu` target installed
 - Docker
 - [just](https://just.systems)
 
