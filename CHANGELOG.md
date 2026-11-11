@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.1] - 2026-11-11
+
+### 🐛 Bug Fixes
+
+- Stop periodic HID rescans and harden device reconnects
+
+### ⚙️ Miscellaneous Tasks
+
+- *(release)* Document release workflow in readme
+
 ## [0.2.0] - 2026-09-10
 
 ### 🚀 Features
