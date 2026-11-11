@@ -17,6 +17,7 @@ use watcher::watcher_task;
 use tokio::signal::unix::{SignalKind, signal};
 
 mod device;
+mod health;
 mod inputs;
 mod mappings;
 mod palette;
@@ -105,7 +106,16 @@ impl global_events::GlobalEventHandler for GlobalEventHandler {
     }
 
     async fn device_plugin_set_image(&self, event: SetImageEvent) -> OpenActionResult<()> {
-        log::debug!("Asked to set image: {:#?}", event);
+        log::debug!(
+            "Asked to set image: device={}, controller={:?}, position={:?}, image={}",
+            event.device,
+            event.controller,
+            event.position,
+            event.image.as_ref().map_or_else(
+                || "none".to_string(),
+                |image| format!("{} bytes", image.len())
+            )
+        );
 
         // Skip knobs images
         if event.controller == Some("Encoder".to_string()) {

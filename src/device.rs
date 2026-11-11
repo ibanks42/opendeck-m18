@@ -121,26 +121,34 @@ pub async fn device_task(candidate: CandidateDevice, token: Arc<CancellationToke
         None => output_task.await,
     };
 
-    match output_result {
-        Ok(Ok(())) => {}
+    let output_failed = match output_result {
+        Ok(Ok(())) => false,
         Ok(Err(err)) => {
             handle_error(&candidate.id, &token, err).await;
+            true
         }
         Err(err) => {
             log::error!("Output worker for {} panicked: {}", candidate.id, err);
-            disconnect_session(&candidate.id, &token).await;
+            if disconnect_session(&candidate.id, &token).await {
+                crate::health::connection_lost(&candidate.id);
+                crate::watcher::request_recovery(&candidate.id);
+            }
+            true
         }
-    }
+    };
 
     disconnect_session(&candidate.id, &token).await;
 
-    log::debug!("Shutting down owned device {:?}", candidate);
-    // This task always owns this exact handle. The output worker has fully
-    // stopped, so shutdown cannot overlap with another write on it.
-    device.shutdown().await.ok();
+    if output_failed {
+        log::debug!(
+            "Skipping shutdown of {} after an output error",
+            candidate.id
+        );
+    } else {
+        log::debug!("Shutting down owned device {:?}", candidate);
+        device.shutdown().await.ok();
+    }
 
-    // A pending HID read must not be cancelled and then reused. Detaching lets a
-    // physical disconnect complete it normally; it owns no output path.
     drop(input_task);
 
     log::debug!("Device task finished for {:?}", candidate);
@@ -310,7 +318,8 @@ fn schedule_flush(flush_deadline: &mut Option<Instant>) {
 }
 
 /// Handles a device error. Image conversion errors are nonfatal; HID and
-/// protocol errors discard this connection generation so the watcher can reopen it.
+/// protocol errors discard this connection generation and ask the watcher to
+/// check whether the device is still present so it can be reopened.
 pub async fn handle_error(
     id: &str,
     expected_token: &Arc<CancellationToken>,
@@ -322,7 +331,12 @@ pub async fn handle_error(
         return true;
     }
 
-    disconnect_session(id, expected_token).await;
+    // Only the call that actually tore the session down requests recovery. If an
+    // OS disconnect already removed it, the hotplug watcher owns reconnection.
+    if disconnect_session(id, expected_token).await {
+        crate::health::connection_lost(id);
+        crate::watcher::request_recovery(id);
+    }
     false
 }
 
@@ -370,6 +384,7 @@ async fn device_events_task(
 ) -> Result<(), MirajazzError> {
     log::debug!("Connecting to {} for incoming events", candidate.id);
     let reader = device.get_reader(|_, _| Ok(DeviceInput::NoData));
+    let mut reports = spawn_report_reader(&candidate.id, reader);
     let mut sink = OpenDeckKeyEventSink;
 
     log::debug!("Connected to {} for incoming events", candidate.id);
@@ -378,7 +393,11 @@ async fn device_events_task(
     loop {
         log::debug!("Reading updates...");
 
-        let report = match reader.raw_read_data(512).await {
+        let Some(result) = reports.recv().await else {
+            // The reader stopped after delivering its error.
+            break;
+        };
+        let report = match result {
             Ok(report) => report,
             Err(e) => {
                 if !handle_error(&candidate.id, &token, e).await {
@@ -401,6 +420,58 @@ async fn device_events_task(
     }
 
     Ok(())
+}
+
+type ReportResult = Result<Vec<u8>, MirajazzError>;
+
+/// Raw input reports are read in their own loop and delivered over a channel.
+/// The loop stops after the first read error, or once the receiver is dropped
+/// and the next report arrives.
+///
+/// On Windows the loop runs on a dedicated OS thread. Windows cancels a pending
+/// overlapped `ReadFile` (ERROR_OPERATION_ABORTED) when the thread that issued
+/// it exits. Polled from tokio, a read can be issued on a worker that mirajazz's
+/// `block_in_place` image conversion later hands to the blocking pool, which
+/// retires idle threads after 10 s, aborting the read and dropping the device.
+fn spawn_report_reader(
+    id: &str,
+    reader: Arc<mirajazz::state::DeviceStateReader>,
+) -> mpsc::Receiver<ReportResult> {
+    let (sender, receiver) = mpsc::channel(32);
+
+    #[cfg(target_os = "windows")]
+    {
+        let spawned = std::thread::Builder::new()
+            .name(format!("hid-read-{id}"))
+            .spawn(move || {
+                loop {
+                    let result = futures_lite::future::block_on(reader.raw_read_data(512));
+                    let failed = result.is_err();
+                    if sender.blocking_send(result).is_err() || failed {
+                        break;
+                    }
+                }
+            });
+        if let Err(error) = spawned {
+            log::error!("Unable to start input reader thread for {}: {}", id, error);
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = id;
+        tokio::spawn(async move {
+            loop {
+                let result = reader.raw_read_data(512).await;
+                let failed = result.is_err();
+                if sender.send(result).await.is_err() || failed {
+                    break;
+                }
+            }
+        });
+    }
+
+    receiver
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -546,6 +617,7 @@ async fn device_output_task<D: OutputDevice + 'static>(
     }
     keepalive.set_missed_tick_behavior(MissedTickBehavior::Skip);
     keepalive.tick().await;
+    crate::health::session_started(&id);
 
     let mut flush_deadline: Option<Instant> = None;
 
@@ -556,9 +628,11 @@ async fn device_output_task<D: OutputDevice + 'static>(
         let action = tokio::select! {
             biased;
             _ = token.cancelled() => OutputAction::Cancel,
+            // Ahead of commands: the device resets itself after ~25 s without a
+            // keepalive, so a steady stream of image updates must not starve it.
+            _ = keepalive.tick() => OutputAction::KeepAlive,
             _ = sleep_until(flush_at), if flush_deadline.is_some() => OutputAction::Flush,
             command = receiver.recv() => OutputAction::Command(command),
-            _ = keepalive.tick() => OutputAction::KeepAlive,
         };
 
         let result = match action {
@@ -598,7 +672,10 @@ async fn device_output_task<D: OutputDevice + 'static>(
             }
             OutputAction::KeepAlive => {
                 log::debug!("Sending keepalive to {}", id);
-                device.keep_alive().await.map(|_| OutputStep::Continue)
+                device.keep_alive().await.map(|_| {
+                    crate::health::keepalive_sent(&id);
+                    OutputStep::Continue
+                })
             }
         };
 

@@ -79,6 +79,14 @@ impl<D, O> SessionRegistry<D, O> {
         Some(token)
     }
 
+    /// True when a session for `id` exists and has not been cancelled, i.e. it is
+    /// connecting or connected rather than being torn down.
+    pub fn is_active(&self, id: &str) -> bool {
+        self.registrations
+            .get(id)
+            .is_some_and(|registered| !registered.token.is_cancelled())
+    }
+
     pub fn is_current(&self, id: &str, token: &Arc<CancellationToken>) -> bool {
         self.registrations
             .get(id)
