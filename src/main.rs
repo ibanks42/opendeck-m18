@@ -61,6 +61,39 @@ async fn send_device_command(device_id: &str, command: DeviceCommand) {
     }
 }
 
+#[cfg(target_os = "macos")]
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGMainDisplayID() -> u32;
+    fn CGDisplayIsAsleep(display: u32) -> i32;
+}
+
+#[cfg(target_os = "macos")]
+async fn display_sleep_watcher_task(token: Arc<CancellationToken>) {
+    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1));
+    let mut last_asleep = false;
+    loop {
+        tokio::select! {
+            _ = token.cancelled() => break,
+            _ = ticker.tick() => {
+                let asleep = unsafe { CGDisplayIsAsleep(CGMainDisplayID()) != 0 };
+                if asleep != last_asleep {
+                    last_asleep = asleep;
+                    log::info!("macOS main display asleep state changed: {}", asleep);
+                    let outputs: Vec<Arc<DeviceOutput>> = {
+                        SESSIONS.read().await.all_outputs().into_iter().cloned().collect()
+                    };
+                    for output in outputs {
+                        if output.send(DeviceCommand::DisplaySleep(asleep)).await.is_err() {
+                            output.token.cancel();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 struct GlobalEventHandler {}
 #[async_trait]
 impl global_events::GlobalEventHandler for GlobalEventHandler {
@@ -76,6 +109,16 @@ impl global_events::GlobalEventHandler for GlobalEventHandler {
             .write()
             .await
             .insert_task("_watcher_task".to_string(), token);
+
+        #[cfg(target_os = "macos")]
+        {
+            let sleep_token = Arc::new(CancellationToken::new());
+            tracker.spawn(display_sleep_watcher_task(sleep_token.clone()));
+            SESSIONS
+                .write()
+                .await
+                .insert_task("_display_sleep_watcher".to_string(), sleep_token);
+        }
 
         log::info!("Plugin initialized");
 

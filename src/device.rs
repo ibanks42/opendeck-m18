@@ -26,6 +26,7 @@ pub enum DeviceCommand {
     ClearImage(u8),
     ClearAll,
     SetBrightness(u8),
+    DisplaySleep(bool),
     SetLedColors(LedPalette),
 }
 
@@ -616,6 +617,8 @@ async fn device_output_task<D: OutputDevice + 'static>(
     let mut colors_now = saved;
     let mut images: HashMap<u8, DynamicImage> = HashMap::new();
     let mut screen: Option<u8> = None;
+    let mut requested_brightness: u8 = 50;
+    let mut display_asleep = false;
     if let Some(colors) = saved {
         log::info!("Restoring LED palette for {}", id);
         device.set_led_colors(&colors).await?;
@@ -680,10 +683,37 @@ async fn device_output_task<D: OutputDevice + 'static>(
                 }
             }
             OutputAction::Command(Some(DeviceCommand::SetBrightness(brightness))) => {
+                requested_brightness = brightness;
+                let effective = if display_asleep { 0 } else { requested_brightness };
                 let was_dark = screen == Some(0);
-                screen = Some(brightness);
-                set_brightness_following(&*device, &kind, was_dark, brightness, colors_now, &images)
+                screen = Some(effective);
+                set_brightness_following(&*device, &kind, was_dark, effective, colors_now, &images)
                     .await
+            }
+            OutputAction::Command(Some(DeviceCommand::DisplaySleep(asleep))) => {
+                if display_asleep == asleep {
+                    Ok(OutputStep::Continue)
+                } else {
+                    display_asleep = asleep;
+                    let effective = if display_asleep { 0 } else { requested_brightness };
+                    let was_dark = screen == Some(0);
+                    screen = Some(effective);
+                    log::info!(
+                        "Display sleep changed to {} for {}, setting effective brightness to {}",
+                        asleep,
+                        id,
+                        effective
+                    );
+                    set_brightness_following(
+                        &*device,
+                        &kind,
+                        was_dark,
+                        effective,
+                        colors_now,
+                        &images,
+                    )
+                    .await
+                }
             }
             OutputAction::Command(Some(DeviceCommand::SetLedColors(colors))) => {
                 colors_now = Some(colors);
