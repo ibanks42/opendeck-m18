@@ -157,6 +157,20 @@ impl<D, O> SessionRegistry<D, O> {
         }
     }
 
+    pub fn all_outputs(&self) -> Vec<&O> {
+        self.registrations
+            .values()
+            .filter_map(|reg| match &reg.phase {
+                SessionPhase::Registering {
+                    output: Some(output),
+                    ..
+                }
+                | SessionPhase::Published { output, .. } => Some(output),
+                _ => None,
+            })
+            .collect()
+    }
+
     pub fn begin_removal(&mut self, id: &str, expected: SessionMatch<'_>) -> Option<Removal<D, O>> {
         let registered = self.registrations.get_mut(id)?;
         let matches = match expected {
